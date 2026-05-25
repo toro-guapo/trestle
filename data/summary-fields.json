@@ -1,0 +1,26 @@
+[
+  {
+    "name": "scannedFileCount",
+    "description": "Number of files read."
+  },
+  {
+    "name": "elapsedMilliseconds",
+    "description": "Wall-clock duration of the scan, in milliseconds."
+  },
+  {
+    "name": "criticalCount",
+    "description": "Number of critical findings."
+  },
+  {
+    "name": "warningCount",
+    "description": "Number of warning findings."
+  },
+  {
+    "name": "totalCount",
+    "description": "Total finding count."
+  },
+  {
+    "name": "message",
+    "description": "A human-readable summary line."
+  }
+]

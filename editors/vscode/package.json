@@ -1,0 +1,62 @@
+{
+  "name": "trestle-vscode",
+  "displayName": "Trestle",
+  "description": "Local secret scanner.",
+  "version": "1.2.0",
+  "publisher": "toroguapo",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/toro-guapo/trestle.git",
+    "directory": "editors/vscode"
+  },
+  "bugs": {
+    "url": "https://github.com/toro-guapo/trestle/issues"
+  },
+  "icon": "icon.png",
+  "private": true,
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "configuration": {
+      "title": "Trestle",
+      "properties": {
+        "trestle.path": {
+          "type": "string",
+          "default": "",
+          "description": "Optional path to a trestle executable. When empty, the extension uses trestle from PATH or the bundled binary."
+        },
+        "trestle.trace": {
+          "type": "boolean",
+          "default": false,
+          "description": "Log every message exchanged with the language server, along with extra diagnostic information from the extension."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "trestle.restart",
+        "title": "Trestle: Restart Language Server"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -p . --watch",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "@types/vscode": "^1.80.0",
+    "@vscode/vsce": "^3.9.1",
+    "typescript": "^6.0.3"
+  }
+}

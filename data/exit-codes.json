@@ -1,0 +1,14 @@
+[
+  {
+    "code": 0,
+    "description": "The scan completed with no findings."
+  },
+  {
+    "code": 1,
+    "description": "The scan completed with one or more findings."
+  },
+  {
+    "code": 2,
+    "description": "The scan did not complete (for example, a path could not be read or an option was invalid)."
+  }
+]

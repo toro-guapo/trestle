@@ -1,0 +1,621 @@
+[package]
+name = "trestle"
+version = "1.2.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[features]
+default = [
+  "lang-config",
+  "lang-dart",
+  "lang-dockerfile",
+  "lang-go",
+  "lang-hcl",
+  "lang-java",
+  "lang-javascript",
+  "lang-json",
+  "lang-php",
+  "lang-plist",
+  "lang-python",
+  "lang-redis",
+  "lang-ruby",
+  "lang-rust",
+  "lang-shell",
+  "lang-toml",
+  "lang-xml",
+  "lang-yaml",
+  "schema-aws-codebuild",
+  "schema-azure-pipelines",
+  "schema-bitbucket-pipelines",
+  "schema-buildkite",
+  "schema-circleci",
+  "schema-docker-compose",
+  "schema-drone",
+  "schema-jupyter",
+  "schema-github-actions",
+  "schema-gitlab-ci",
+  "schema-k8s-secret",
+  "schema-mcp-config",
+  "schema-package-json",
+  "schema-travis-ci",
+  "schema-vscode-tasks",
+  "binary",
+  "pem",
+  "putty",
+  "services",
+  "signatures",
+  "url",
+  "lsp",
+  "mcp",
+  "entropy-key",
+  "entropy-token",
+]
+cache = ["dep:rusqlite", "dep:xxhash-rust"]
+entropy-key = []
+entropy-token = []
+mcp = ["dep:rmcp", "dep:serde", "dep:tokio"]
+lang-config = []
+lsp = ["dep:crossbeam-channel", "dep:lsp-server", "dep:lsp-types", "dep:libc", "dep:windows-sys"]
+lang-dart = ["dep:tree-sitter", "dep:tree-sitter-dart"]
+lang-dockerfile = ["dep:dockerfile-parser"]
+lang-go = ["dep:tree-sitter", "dep:tree-sitter-go"]
+lang-hcl = ["dep:hcl-edit"]
+lang-java = ["dep:tree-sitter", "dep:tree-sitter-java"]
+lang-javascript = [
+  "dep:oxc_allocator",
+  "dep:oxc_ast",
+  "dep:oxc_parser",
+  "dep:oxc_span",
+  "dep:oxc_syntax",
+]
+lang-json = ["dep:jsonc-parser"]
+lang-php = [
+  "dep:mago-ast",
+  "dep:mago-interner",
+  "dep:mago-parser",
+  "dep:mago-source",
+  "dep:mago-span",
+]
+lang-plist = ["dep:plist", "dep:roxmltree"]
+lang-python = [
+  "dep:ruff_python_ast",
+  "dep:ruff_python_parser",
+  "dep:ruff_text_size",
+]
+lang-redis = []
+lang-ruby = ["dep:ruby-prism"]
+lang-rust = ["dep:tree-sitter", "dep:tree-sitter-rust"]
+lang-shell = ["dep:brush-parser"]
+lang-toml = []
+lang-xml = ["dep:roxmltree"]
+lang-yaml = ["dep:yaml-rust2"]
+
+binary = ["binary-der", "binary-gpg", "binary-jceks", "binary-jks", "binary-keepass"]
+binary-der = ["dep:cms", "dep:der", "dep:pkcs1", "dep:pkcs8", "dep:pkcs12", "dep:x509-cert"]
+binary-gpg = ["dep:pgp"]
+binary-jceks = []
+binary-jks = []
+binary-keepass = []
+
+pem = ["dep:pgp"]
+putty = []
+
+services = [
+  "service-adafruit",
+  "service-adobe",
+  "service-airtable",
+  "service-aiven",
+  "service-alchemy",
+  "service-algolia",
+  "service-alibaba",
+  "service-amplitude",
+  "service-assemblyai",
+  "service-asana",
+  "service-auth0",
+  "service-azure",
+  "service-azuredevops",
+  "service-backstage",
+  "service-beamer",
+  "service-bitbucket",
+  "service-bittrex",
+  "service-bugsnag",
+  "service-buildkite",
+  "service-circleci",
+  "service-clickup",
+  "service-cloudflare",
+  "service-codacy",
+  "service-codeclimate",
+  "service-codecov",
+  "service-cohere",
+  "service-coinbase",
+  "service-confluent",
+  "service-contentful",
+  "service-cosmosdb",
+  "service-coveralls",
+  "service-crowdin",
+  "service-datadog",
+  "service-deepgram",
+  "service-deepseek",
+  "service-discord",
+  "service-droneci",
+  "service-elevenlabs",
+  "service-eth",
+  "service-ethereum",
+  "service-etherscan",
+  "service-eventbrite",
+  "service-etsy",
+  "service-facebook",
+  "service-fastly",
+  "service-finicity",
+  "service-finnhub",
+  "service-fireworks",
+  "service-flickr",
+  "service-freshbooks",
+  "service-gitter",
+  "service-gocardless",
+  "service-heroku",
+  "service-hubspot",
+  "service-infura",
+  "service-intercom",
+  "service-jumpcloud",
+  "service-kraken",
+  "service-kucoin",
+  "service-launchdarkly",
+  "service-linkedin",
+  "service-looker",
+  "service-mailchimp",
+  "service-mailgun",
+  "service-mandrill",
+  "service-mapbox",
+  "service-mattermost",
+  "service-meraki",
+  "service-messagebird",
+  "service-mistral",
+  "service-mixpanel",
+  "service-moralis",
+  "service-netlify",
+  "service-notion",
+  "service-nytimes",
+  "service-okta",
+  "service-optimizely",
+  "service-opsgenie",
+  "service-pagerduty",
+  "service-pinecone",
+  "service-pipedream",
+  "service-plaid",
+  "service-postmark",
+  "service-privateai",
+  "service-qdrant",
+  "service-railway",
+  "service-rapidapi",
+  "service-render",
+  "service-segment",
+  "service-semaphore",
+  "service-sendbird",
+  "service-sentry",
+  "service-shodan",
+  "service-snyk",
+  "service-sonar",
+  "service-sparkpost",
+  "service-square",
+  "service-squarespace",
+  "service-statuspage",
+  "service-storyblok",
+  "service-sumo",
+  "service-supabase",
+  "service-telegram",
+  "service-todoist",
+  "service-together",
+  "service-travis",
+  "service-twitch",
+  "service-typeform",
+  "service-uptimerobot",
+  "service-vercel",
+  "service-virustotal",
+  "service-vultr",
+  "service-wandb",
+  "service-weaviate",
+  "service-webflow",
+  "service-yandex",
+  "service-zendesk",
+  "service-zerotier",
+]
+service-adafruit = []
+service-adobe = []
+service-airtable = []
+service-aiven = []
+service-alchemy = []
+service-algolia = []
+service-alibaba = []
+service-amplitude = []
+service-assemblyai = []
+service-asana = []
+service-auth0 = []
+service-azure = []
+service-azuredevops = []
+service-backstage = []
+service-beamer = []
+service-bitbucket = []
+service-bittrex = []
+service-bugsnag = []
+service-buildkite = []
+service-circleci = []
+service-clickup = []
+service-cloudflare = []
+service-codacy = []
+service-codeclimate = []
+service-codecov = []
+service-cohere = []
+service-coinbase = []
+service-confluent = []
+service-contentful = []
+service-cosmosdb = []
+service-coveralls = []
+service-crowdin = []
+service-datadog = []
+service-deepgram = []
+service-deepseek = []
+service-discord = []
+service-droneci = []
+service-elevenlabs = []
+service-eth = []
+service-ethereum = []
+service-etherscan = []
+service-etsy = []
+service-eventbrite = []
+service-facebook = []
+service-fastly = []
+service-finicity = []
+service-finnhub = []
+service-fireworks = []
+service-flickr = []
+service-freshbooks = []
+service-gitter = []
+service-gocardless = []
+service-heroku = []
+service-hubspot = []
+service-infura = []
+service-intercom = []
+service-jumpcloud = []
+service-kraken = []
+service-kucoin = []
+service-launchdarkly = []
+service-linkedin = []
+service-looker = []
+service-mailchimp = []
+service-mailgun = []
+service-mandrill = []
+service-mapbox = []
+service-mattermost = []
+service-meraki = []
+service-messagebird = []
+service-mistral = []
+service-mixpanel = []
+service-moralis = []
+service-netlify = []
+service-notion = []
+service-nytimes = []
+service-okta = []
+service-optimizely = []
+service-opsgenie = []
+service-pagerduty = []
+service-pinecone = []
+service-pipedream = []
+service-plaid = []
+service-postmark = []
+service-privateai = []
+service-qdrant = []
+service-railway = []
+service-rapidapi = []
+service-render = []
+service-segment = []
+service-semaphore = []
+service-sendbird = []
+service-sentry = []
+service-shodan = []
+service-snyk = []
+service-sonar = []
+service-sparkpost = []
+service-square = []
+service-squarespace = []
+service-statuspage = []
+service-storyblok = []
+service-sumo = []
+service-supabase = []
+service-telegram = []
+service-todoist = []
+service-together = []
+service-travis = []
+service-twitch = []
+service-typeform = []
+service-uptimerobot = []
+service-vercel = []
+service-virustotal = []
+service-vultr = []
+service-wandb = []
+service-weaviate = []
+service-webflow = []
+service-yandex = []
+service-zendesk = []
+service-zerotier = []
+
+signatures = [
+  "signature-1password",
+  "signature-adafruit",
+  "signature-age",
+  "signature-alchemy",
+  "signature-anthropic",
+  "signature-apify",
+  "signature-argon2",
+  "signature-atbb",
+  "signature-artifactory",
+  "signature-atlassian",
+  "signature-aws",
+  "signature-aws-temp",
+  "signature-axiom",
+  "signature-azure-connection",
+  "signature-bcrypt",
+  "signature-buildkite",
+  "signature-azure-entra",
+  "signature-brevo",
+  "signature-circleci",
+  "signature-clojars",
+  "signature-contentful",
+  "signature-databricks",
+  "signature-digitalocean",
+  "signature-discord",
+  "signature-discord-bot",
+  "signature-docker",
+  "signature-doppler",
+  "signature-dynatrace",
+  "signature-figma",
+  "signature-flutterwave",
+  "signature-flyio",
+  "signature-github",
+  "signature-gitlab",
+  "signature-google",
+  "signature-google-oauth",
+  "signature-grafana",
+  "signature-groq",
+  "signature-hashicorp-vault",
+  "signature-heroku",
+  "signature-honeycomb",
+  "signature-huggingface",
+  "signature-infracost",
+  "signature-jwt",
+  "signature-langsmith",
+  "signature-launchdarkly",
+  "signature-linear",
+  "signature-netlify",
+  "signature-newrelic",
+  "signature-notion",
+  "signature-npm",
+  "signature-nuget",
+  "signature-openai",
+  "signature-pbkdf2",
+  "signature-perplexity",
+  "signature-planetscale",
+  "signature-posthog",
+  "signature-postman",
+  "signature-pulumi",
+  "signature-pypi",
+  "signature-razorpay",
+  "signature-render",
+  "signature-replicate",
+  "signature-scrypt",
+  "signature-rubygems",
+  "signature-sendgrid",
+  "signature-sentry",
+  "signature-sentry-dsn",
+  "signature-shopify",
+  "signature-slack",
+  "signature-slack-webhook",
+  "signature-sonar",
+  "signature-sourcegraph",
+  "signature-square",
+  "signature-stripe",
+  "signature-stripe-publishable",
+  "signature-supabase",
+  "signature-tailscale",
+  "signature-telegram",
+  "signature-twilio",
+  "signature-typeform",
+  "signature-vercel",
+  "signature-xata",
+  "signature-yandex",
+]
+signature-1password = []
+signature-adafruit = []
+signature-age = []
+signature-alchemy = []
+signature-anthropic = []
+signature-apify = []
+signature-argon2 = []
+signature-atbb = []
+signature-artifactory = []
+signature-atlassian = []
+signature-aws = []
+signature-aws-temp = []
+signature-axiom = []
+signature-bcrypt = []
+signature-buildkite = []
+signature-azure-connection = []
+signature-azure-entra = []
+signature-brevo = []
+signature-circleci = []
+signature-clojars = []
+signature-contentful = []
+signature-databricks = []
+signature-digitalocean = []
+signature-discord = []
+signature-discord-bot = []
+signature-docker = []
+signature-doppler = []
+signature-dynatrace = []
+signature-figma = []
+signature-flutterwave = []
+signature-flyio = []
+signature-github = []
+signature-gitlab = []
+signature-google = []
+signature-google-oauth = []
+signature-grafana = []
+signature-groq = []
+signature-hashicorp-vault = []
+signature-heroku = []
+signature-honeycomb = []
+signature-huggingface = []
+signature-infracost = []
+signature-jwt = []
+signature-langsmith = []
+signature-launchdarkly = []
+signature-linear = []
+signature-netlify = []
+signature-newrelic = []
+signature-notion = []
+signature-npm = []
+signature-nuget = []
+signature-openai = []
+signature-pbkdf2 = []
+signature-perplexity = []
+signature-planetscale = []
+signature-posthog = []
+signature-postman = []
+signature-pulumi = []
+signature-pypi = []
+signature-razorpay = []
+signature-render = []
+signature-replicate = []
+signature-scrypt = []
+signature-rubygems = []
+signature-sendgrid = []
+signature-sentry = []
+signature-sentry-dsn = []
+signature-shopify = []
+signature-slack = []
+signature-slack-webhook = []
+signature-sonar = []
+signature-sourcegraph = []
+signature-square = []
+signature-stripe = []
+signature-stripe-publishable = []
+signature-supabase = []
+signature-tailscale = []
+signature-telegram = []
+signature-twilio = []
+signature-typeform = []
+signature-vercel = []
+signature-xata = []
+signature-yandex = []
+
+url = ["dep:form_urlencoded", "dep:percent-encoding", "dep:url"]
+
+schema-aws-codebuild = ["lang-yaml", "lang-shell"]
+schema-azure-pipelines = ["lang-yaml", "lang-shell"]
+schema-bitbucket-pipelines = ["lang-yaml", "lang-shell"]
+schema-buildkite = ["lang-yaml", "lang-shell"]
+schema-circleci = ["lang-yaml", "lang-shell"]
+schema-docker-compose = ["lang-json"]
+schema-drone = ["lang-yaml", "lang-shell"]
+schema-jupyter = ["lang-json"]
+schema-github-actions = ["lang-yaml", "lang-shell"]
+schema-gitlab-ci = ["lang-yaml", "lang-shell"]
+schema-k8s-secret = ["lang-yaml"]
+schema-mcp-config = ["lang-json", "lang-shell"]
+schema-package-json = ["lang-json", "lang-shell"]
+schema-travis-ci = ["lang-yaml", "lang-shell"]
+schema-vscode-tasks = ["lang-json", "lang-shell"]
+
+[dependencies]
+aho-corasick = "1.1.4"
+base64 = "0.22.1"
+bip39 = "2.2.2"
+brush-parser = { version = "0.3.0", optional = true }
+cms = { version = "0.2", default-features = false, optional = true }
+croner = "3.0.1"
+crossbeam-channel = { version = "0.5", optional = true }
+csv = "1.4"
+csscolorparser = "0.8"
+der = { version = "0.7", default-features = false, features = ["alloc"], optional = true }
+dirs = "6.0"
+dockerfile-parser = { version = "0.9", optional = true }
+email_address = "0.2"
+fastrand = "2"
+form_urlencoded = { version = "1", optional = true }
+glob-match = "0.2"
+gix = "0.81"
+heck = "0.5"
+icu_locale_core = "2.2"
+icu_time = { version = "2.2", default-features = false, features = ["compiled_data"] }
+in_definite = "1.1"
+ixdtf = "0.6"
+hcl-edit = { version = "0.9", optional = true }
+jsonc-parser = { version = "0.32.3", optional = true }
+mago-ast = { version = "0.22.2", optional = true }
+mago-interner = { version = "0.22.2", optional = true }
+mago-parser = { version = "0.22.2", optional = true }
+mago-source = { version = "0.22.2", optional = true }
+mago-span = { version = "0.22.2", optional = true }
+mime = "0.3"
+mimalloc = { version = "*", features = ["v3"] }
+notify = "8"
+oxc_allocator = { version = "0.124", optional = true }
+percent-encoding = { version = "2", optional = true }
+pgp = { version = "0.19", default-features = false, optional = true }
+oxc_ast = { version = "0.124", optional = true }
+oxc_parser = { version = "0.124", optional = true }
+oxc_span = { version = "0.124", optional = true }
+oxc_syntax = { version = "0.124", optional = true }
+pkcs1 = { version = "0.7", default-features = false, features = ["alloc"], optional = true }
+pkcs8 = { version = "0.10", default-features = false, features = ["alloc"], optional = true }
+pkcs12 = { version = "0.1", default-features = false, optional = true }
+plist = { version = "1.8.0", default-features = false, optional = true }
+quick-xml = "0.39"
+rayon = "1.11.0"
+regex = "1.12.3"
+roxmltree = { version = "0.21", optional = true }
+ruby-prism = { version = "1.9", optional = true }
+rusqlite = { version = "0.39", features = ["bundled"], optional = true }
+serde_json = "1"
+lsp-server = { version = "0.7", optional = true }
+lsp-types = { version = "0.94.1", optional = true }
+rmcp = { version = "1.6", features = ["transport-io"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+ruff_python_ast = { git = "https://github.com/astral-sh/ruff", tag = "0.15.10", optional = true }
+ruff_python_parser = { git = "https://github.com/astral-sh/ruff", tag = "0.15.10", optional = true }
+ruff_text_size = { git = "https://github.com/astral-sh/ruff", tag = "0.15.10", optional = true }
+terminal_size = "0.4"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }
+toml_edit = "0.22"
+tree-sitter = { version = "0.25", optional = true }
+tree-sitter-dart = { version = "0.1.0", optional = true }
+tree-sitter-go = { version = "0.25", optional = true }
+tree-sitter-java = { version = "0.23", optional = true }
+tree-sitter-rust = { version = "0.24", optional = true }
+url = { version = "2", optional = true }
+x509-cert = { version = "0.2", default-features = false, features = ["std"], optional = true }
+xxhash-rust = { version = "0.8", features = ["xxh3"], optional = true }
+yaml-rust2 = { version = "0.11.0", optional = true }
+shell-quote = "0.7.2"
+
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"], optional = true }
+
+[build-dependencies]
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = 0
+
+[profile.profiling]
+inherits = "release"
+strip = false
+debug = 2

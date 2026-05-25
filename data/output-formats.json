@@ -1,0 +1,26 @@
+[
+  {
+    "name": "text",
+    "description": "Findings formatted for reading in a terminal, with optional ANSI colors."
+  },
+  {
+    "name": "csv",
+    "description": "One finding per row, with a header row."
+  },
+  {
+    "name": "json",
+    "description": "A single JSON document containing every finding."
+  },
+  {
+    "name": "junit",
+    "description": "JUnit XML, suitable for CI systems that render JUnit reports."
+  },
+  {
+    "name": "sarif",
+    "description": "SARIF, used by code-scanning dashboards such as GitHub's."
+  },
+  {
+    "name": "xml",
+    "description": "A plain XML rendering of the findings."
+  }
+]

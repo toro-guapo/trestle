@@ -1,0 +1,18 @@
+[
+  {
+    "id": "secret-assignment",
+    "description": "Secret assigned to a named variable, constant, parameter, or property."
+  },
+  {
+    "id": "secret-value",
+    "description": "Secret value found in source code."
+  },
+  {
+    "id": "binary-secret",
+    "description": "Secret found in a binary file."
+  },
+  {
+    "id": "text-secret",
+    "description": "Secret found in a text file."
+  }
+]

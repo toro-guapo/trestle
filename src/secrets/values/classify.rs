@@ -14,9 +14,12 @@ use crate::secrets::putty;
 #[cfg(feature = "url")]
 use crate::secrets::urls::{UrlSecret, classify_url};
 use crate::{
-  formatting::normalize_camel_case_and_lower,
+  formatting::{is_context_word, normalize_camel_case_and_lower},
   processing::SourceContext,
-  scanning::{COMMON_ENGLISH_WORDS, KNOWN_WORDS},
+  scanning::{
+    BRAND_NAMES, COMMON_ENGLISH_WORDS, DOM_EVENTS, FRAMEWORK_EVENTS,
+    KNOWN_WORDS,
+  },
   secrets::{
     names::classify::{NameClass, NameKind},
     values::normalize::NormalizedValue,
@@ -101,7 +104,10 @@ pub fn classify_named_value(
     }
   }
 
-  if let Some(vc) = classify_value_evidence(value, context) {
+  let file_words = segment_file_words(context);
+  let local_words = collect_local_words(&name_class.name_words, &file_words);
+
+  if let Some(vc) = classify_value_evidence(value, context, &local_words) {
     return Some(vc);
   }
 
@@ -112,11 +118,12 @@ pub fn classify_named_value(
     name_class.kind,
     NameKind::Key { weak: true } | NameKind::Token { weak: true }
   ) {
-    return (has_sufficient_entropy(value) && value_could_be_secret(value))
-      .then_some(ValueClass::PossibleSecret);
+    return (has_sufficient_entropy(value)
+      && value_could_be_secret(value, &local_words))
+    .then_some(ValueClass::PossibleSecret);
   }
 
-  if value_could_be_secret(value) {
+  if value_could_be_secret(value, &local_words) {
     Some(ValueClass::PossibleSecret)
   } else {
     None
@@ -384,6 +391,7 @@ fn contains_keyboard_walk(value: &str) -> bool {
 fn classify_value_evidence(
   value: &NormalizedValue,
   context: &SourceContext,
+  local_words: &[&str],
 ) -> Option<ValueClass> {
   #[cfg(feature = "signatures")]
   if let Some(vc) = classify_signature(value) {
@@ -391,9 +399,13 @@ fn classify_value_evidence(
   }
 
   #[cfg(feature = "services")]
-  for service in &context.file_services {
-    if service.matches(value.as_str()) {
-      return Some(ValueClass::Secret(NamedSecret::Service(service)));
+  if !context.file_services.is_empty()
+    && value_could_be_secret(value, local_words)
+  {
+    for service in &context.file_services {
+      if service.matches(value.as_str()) {
+        return Some(ValueClass::Secret(NamedSecret::Service(service)));
+      }
     }
   }
 
@@ -610,11 +622,14 @@ fn classify_value_body(
   value: &NormalizedValue,
   context: &SourceContext,
 ) -> Option<ValueClass> {
-  if let Some(vc) = classify_value_evidence(value, context) {
+  let file_words = segment_file_words(context);
+  let local_words = collect_local_words(&[], &file_words);
+
+  if let Some(vc) = classify_value_evidence(value, context, &local_words) {
     return Some(vc);
   }
 
-  if value_could_be_secret(value) {
+  if value_could_be_secret(value, &local_words) {
     Some(ValueClass::PossibleSecret)
   } else {
     None
@@ -689,12 +704,15 @@ fn is_value_mnemonic(value: &NormalizedValue) -> bool {
   is_bip39_mnemonic(value.as_str())
 }
 
-fn value_could_be_secret(value: &NormalizedValue) -> bool {
+fn value_could_be_secret(
+  value: &NormalizedValue,
+  local_words: &[&str],
+) -> bool {
   if value.len() < 8 {
     return false;
   }
 
-  !is_known_words(value)
+  !is_known_words(value, local_words)
     && !is_multi_segment_word_identifier(value)
     && !contains_non_ascii_letter(value.as_str())
     && !is_file_path(value)
@@ -702,6 +720,7 @@ fn value_could_be_secret(value: &NormalizedValue) -> bool {
     && !contains_long_known_word(value.as_str())
     && !is_markup(value)
     && !is_sentinel(value)
+    && !is_event(value)
     && !is_integrity_hash(value)
     && !is_repeated_char(value)
     && !is_version(value)
@@ -736,6 +755,10 @@ const SENTINELS: &[&str] = &[
 
 fn is_sentinel(value: &NormalizedValue) -> bool {
   SENTINELS.contains(&value.as_str())
+}
+
+fn is_event(value: &NormalizedValue) -> bool {
+  EVENT_SET.with(|set| set.contains(value.as_str()))
 }
 
 const PLACEHOLDER_SUBSTRINGS: &[&str] = &[
@@ -1034,9 +1057,16 @@ fn is_bip39_mnemonic(value: &str) -> bool {
 const MIN_COVERAGE_WORD_LEN: usize = 3;
 
 thread_local! {
+  static EVENT_SET: HashSet<&'static str> = DOM_EVENTS
+    .iter()
+    .chain(FRAMEWORK_EVENTS.iter())
+    .copied()
+    .collect();
+
   static KNOWN_WORD_SET: HashSet<&'static str> = KNOWN_WORDS
     .iter()
     .chain(COMMON_ENGLISH_WORDS.iter())
+    .chain(BRAND_NAMES.iter())
     .copied()
     .collect();
 
@@ -1046,6 +1076,7 @@ thread_local! {
       KNOWN_WORDS
         .iter()
         .chain(COMMON_ENGLISH_WORDS.iter())
+        .chain(BRAND_NAMES.iter())
         .copied()
         .filter(|w| w.len() >= MIN_COVERAGE_WORD_LEN)
         .collect::<Vec<_>>(),
@@ -1066,24 +1097,55 @@ fn segment_value(value: &str) -> Vec<String> {
   out
 }
 
+fn segment_file_words(context: &SourceContext) -> Vec<String> {
+  let Some(stem) = context.file_abs_path.file_stem().and_then(|s| s.to_str())
+  else {
+    return Vec::new();
+  };
+  segment_value(stem)
+    .into_iter()
+    .filter(|s| is_context_word(s))
+    .collect()
+}
+
+fn collect_local_words<'a>(
+  name_words: &'a [String],
+  file_words: &'a [String],
+) -> Vec<&'a str> {
+  name_words
+    .iter()
+    .map(String::as_str)
+    .chain(file_words.iter().map(String::as_str))
+    .collect()
+}
+
 const KNOWN_WORD_THRESHOLD: usize = 3;
 const KNOWN_WORD_COVERAGE: f64 = 0.6;
 const MULTI_SEGMENT_IDENTIFIER_CHAR_COVERAGE: f64 = 0.45;
 
-pub fn is_known_words(value: &NormalizedValue) -> bool {
+pub fn is_known_words(value: &NormalizedValue, local_words: &[&str]) -> bool {
   KNOWN_WORD_SET.with(|set| {
     let segments = segment_value(value.original());
-    if segments.is_empty() {
+
+    let alphabetic: Vec<&String> = segments
+      .iter()
+      .filter(|s| s.bytes().any(|b| b.is_ascii_alphabetic()))
+      .collect();
+
+    if alphabetic.is_empty() {
       return false;
     }
 
-    let matched = segments.iter().filter(|s| set.contains(s.as_str())).count();
-    if matched >= segments.len() || matched >= KNOWN_WORD_THRESHOLD {
+    let is_known =
+      |s: &str| set.contains(s) || local_words.iter().any(|w| *w == s);
+
+    let matched = alphabetic.iter().filter(|s| is_known(s.as_str())).count();
+    if matched >= alphabetic.len() || matched >= KNOWN_WORD_THRESHOLD {
       return true;
     }
 
-    if segments.len() == 1 {
-      return is_concatenated_known_words(&segments[0]);
+    if alphabetic.len() == 1 {
+      return is_concatenated_known_words(alphabetic[0]);
     }
 
     false

@@ -125,6 +125,7 @@ async function startClient(): Promise<void> {
     if (isTraceEnabled()) {
       await client.setTrace(Trace.Verbose);
     }
+    await preloadOpenTabs();
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     output?.appendLine(`Failed to start language server: ${detail}`);
@@ -133,6 +134,46 @@ async function startClient(): Promise<void> {
     );
     client = undefined;
   }
+}
+
+async function preloadOpenTabs(): Promise<void> {
+  const seen = new Set<string>();
+
+  for (const group of vscode.window.tabGroups.all) {
+    for (const tab of group.tabs) {
+      const uri = tabFileUri(tab);
+      if (!uri || uri.scheme !== "file") {
+        continue;
+      }
+
+      const key = uri.toString();
+      if (seen.has(key)) {
+        continue;
+      }
+
+      seen.add(key);
+
+      try {
+        await vscode.workspace.openTextDocument(uri);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        trace(`Failed to preload ${key}: ${detail}`);
+      }
+    }
+  }
+
+  trace(`Preloaded ${seen.size} tab document(s).`);
+}
+
+function tabFileUri(tab: vscode.Tab): vscode.Uri | undefined {
+  const input = tab.input;
+  if (input instanceof vscode.TabInputText) {
+    return input.uri;
+  }
+  if (input instanceof vscode.TabInputTextDiff) {
+    return input.modified;
+  }
+  return undefined;
 }
 
 function resolveCommand(): string {

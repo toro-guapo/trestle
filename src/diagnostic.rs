@@ -291,6 +291,7 @@ pub fn check_credential_assignment(
     #[cfg(feature = "services")]
     service: None,
     kind: NameKind::Sensitive,
+    name_words: Vec::new(),
   };
   let value_class = classify_named_value(&synthetic, value, context)?;
 

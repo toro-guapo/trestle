@@ -835,6 +835,7 @@ fn respond<T: serde::Serialize>(
 
 pub struct Workspace {
   roots: RefCell<Vec<RootContext>>,
+  ephemeral_roots: RefCell<HashMap<PathBuf, RootContext>>,
   options_resolver: Arc<trestlerc::OptionsResolver>,
 }
 
@@ -850,6 +851,7 @@ impl Workspace {
 
     Self {
       roots: RefCell::new(roots),
+      ephemeral_roots: RefCell::new(HashMap::new()),
       options_resolver,
     }
   }
@@ -878,32 +880,25 @@ impl Workspace {
     if trestlerc::is_trestlerc(&path) {
       return analyze_trestlerc(text);
     }
-    let roots = self.roots.borrow();
-    let Some(root) = pick_root(&roots, &path) else {
+
+    {
+      let roots = self.roots.borrow();
+      if let Some(root) = pick_root(&roots, &path) {
+        return scan_in_root(root, &path, text);
+      }
+    }
+
+    let Some(ephemeral_dir) = ephemeral_root_dir(&path) else {
       return (Vec::new(), Vec::new());
     };
 
-    let (diag_tx, diag_rx) = mpsc::channel();
-    let scan = root.scan.borrow();
-    let run_context = scan.make_run_context_no_cache(diag_tx);
+    let resolver = self.options_resolver.clone();
+    let mut ephemeral = self.ephemeral_roots.borrow_mut();
+    let root = ephemeral
+      .entry(ephemeral_dir.clone())
+      .or_insert_with(|| RootContext::new(resolver, ephemeral_dir));
 
-    if is_path_skipped(&run_context, &path) {
-      drop(run_context);
-      return (Vec::new(), Vec::new());
-    }
-
-    process_text(&run_context, &path, text);
-    run_context.flush_file_diagnostics();
-    drop(run_context);
-    drop(scan);
-
-    let mut diagnostics = Vec::new();
-    let hovers = Vec::new();
-    for diagnostic in diag_rx {
-      let range = diagnostic_range(&diagnostic);
-      diagnostics.push(to_lsp_diagnostic(diagnostic, range));
-    }
-    (diagnostics, hovers)
+    scan_in_root(root, &path, text)
   }
 
   pub fn scan_root(
@@ -949,6 +944,9 @@ impl Workspace {
     if let Some(root) = roots.iter().find(|r| r.abs_dir == root_dir) {
       root.reload();
     }
+
+    self.invalidate_ephemeral_roots();
+
     Some(root_dir)
   }
 
@@ -958,7 +956,14 @@ impl Workspace {
     if let Some(root) = roots.iter().find(|r| r.abs_dir == root_dir) {
       root.reload();
     }
+
+    self.invalidate_ephemeral_roots();
+
     Some(root_dir)
+  }
+
+  fn invalidate_ephemeral_roots(&self) {
+    self.ephemeral_roots.borrow_mut().clear();
   }
 
   pub fn is_path_statically_skipped(&self, path: &Path) -> bool {
@@ -1001,6 +1006,50 @@ fn pick_root<'a>(
     .iter()
     .filter(|r| path.starts_with(&r.abs_dir))
     .max_by_key(|r| r.abs_dir.as_os_str().len())
+}
+
+fn scan_in_root(
+  root: &RootContext,
+  path: &Path,
+  text: &str,
+) -> (Vec<LspDiagnostic>, Vec<HoverEntry>) {
+  let (diag_tx, diag_rx) = mpsc::channel();
+  let scan = root.scan.borrow();
+
+  let run_context = scan.make_run_context_no_cache(diag_tx);
+
+  if is_path_skipped(&run_context, path) {
+    drop(run_context);
+    return (Vec::new(), Vec::new());
+  }
+
+  let path_buf = path.to_path_buf();
+
+  process_text(&run_context, &path_buf, text);
+  run_context.flush_file_diagnostics();
+
+  drop(run_context);
+  drop(scan);
+
+  let mut diagnostics = Vec::new();
+  let hovers = Vec::new();
+
+  for diagnostic in diag_rx {
+    let range = diagnostic_range(&diagnostic);
+    diagnostics.push(to_lsp_diagnostic(diagnostic, range));
+  }
+
+  (diagnostics, hovers)
+}
+
+fn ephemeral_root_dir(path: &Path) -> Option<PathBuf> {
+  let parent = path.parent()?;
+
+  if let Some(repo) = crate::git::open(parent) {
+    return Some(repo.workdir().to_path_buf());
+  }
+
+  Some(parent.to_path_buf())
 }
 
 pub struct RootContext {

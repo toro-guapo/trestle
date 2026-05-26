@@ -170,11 +170,26 @@ pub fn js_property_access(object: &str, name: &str) -> String {
   }
 }
 
+pub fn is_context_word(s: &str) -> bool {
+  s.len() >= 5 && s.bytes().all(|b| b.is_ascii_alphabetic())
+}
+
 pub fn normalize_camel_case_and_lower(name: &str) -> Vec<String> {
   let bytes = name.as_bytes();
   if bytes.is_empty() {
     return Vec::new();
   }
+
+  const MAX_DIGIT_BOUNDARIES_FOR_SPLIT: usize = 2;
+  let digit_boundary_count = bytes
+    .windows(2)
+    .filter(|w| {
+      (w[0].is_ascii_alphabetic() && w[1].is_ascii_digit())
+        || (w[0].is_ascii_digit() && w[1].is_ascii_alphabetic())
+    })
+    .count();
+
+  let split_digits = digit_boundary_count <= MAX_DIGIT_BOUNDARIES_FOR_SPLIT;
 
   let mut out = Vec::with_capacity(4);
   let mut start = 0;
@@ -191,7 +206,17 @@ pub fn normalize_camel_case_and_lower(name: &str) -> Vec<String> {
       // ABCDef -> ABC | Def
       (prev.is_ascii_uppercase()
         && curr.is_ascii_uppercase()
-        && next.is_some_and(|n| n.is_ascii_lowercase()));
+        && next.is_some_and(|n| n.is_ascii_lowercase()))
+      ||
+      // abcd2 -> abcd | 2 (only when the transition pattern is clean)
+      (split_digits
+        && prev.is_ascii_alphabetic()
+        && curr.is_ascii_digit())
+      ||
+      // 2abcd -> 2 | abcd (only when the transition pattern is clean)
+      (split_digits
+        && prev.is_ascii_digit()
+        && curr.is_ascii_alphabetic());
 
     if boundary {
       out.push(name[start..i].to_ascii_lowercase());

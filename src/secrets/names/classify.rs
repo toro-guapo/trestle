@@ -1,6 +1,7 @@
 #[cfg(feature = "services")]
 use crate::scanning::{SERVICE_KEYWORDS, Service};
 use crate::{
+  formatting::is_context_word,
   scanning::{
     DISQUALIFIERS, EXCLUSIONS, KEY_DISQUALIFIERS, KEY_QUALIFIER_PHRASES,
     KEY_QUALIFIERS, STRONG_KEYWORD_PHRASES, STRONG_KEYWORDS,
@@ -22,6 +23,7 @@ pub struct NameClass {
   #[cfg(feature = "services")]
   pub service: Option<&'static Service>,
   pub kind: NameKind,
+  pub name_words: Vec<String>,
 }
 
 pub fn classify_normalized_name(
@@ -88,6 +90,7 @@ pub fn classify_normalized_name(
       #[cfg(feature = "services")]
       service: found_service,
       kind: NameKind::Mnemonic,
+      name_words: Vec::new(),
     });
   }
 
@@ -194,10 +197,17 @@ pub fn classify_normalized_name(
     }
   }
 
+  let name_words: Vec<String> = segments
+    .iter()
+    .filter(|s| is_context_word(s))
+    .cloned()
+    .collect();
+
   Some(NameClass {
     #[cfg(feature = "services")]
     service: found_service,
     kind,
+    name_words,
   })
 }
 

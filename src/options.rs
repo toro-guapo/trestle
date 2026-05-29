@@ -1,8 +1,11 @@
 use std::path::{Path, PathBuf};
 
 use crate::exit::EXIT_CODES;
+use crate::fingerprint::Fingerprint;
 
 const DEFAULT_AUTO_EXCLUDES: bool = true;
+#[cfg(feature = "git-history")]
+const DEFAULT_DEEP: &str = "false";
 #[cfg(feature = "cache")]
 const DEFAULT_CACHE_DIRECTORY: &str = "";
 const DEFAULT_OUTPUT_FILE: &str = "-";
@@ -12,11 +15,19 @@ const DEFAULT_COLOR: Option<bool> = None;
 const DEFAULT_COLOR_DESCRIPTION: &str =
   "true when output is a terminal, otherwise false";
 const DEFAULT_SHOW_SUMMARY: bool = true;
+#[cfg(feature = "git-history")]
+const DEFAULT_SKIP_COMMITS: &[&str] = &[];
+#[cfg(feature = "git-history")]
+const DEFAULT_SKIP_COMMITS_UP_TO: &str = "";
 const DEFAULT_SKIP_DIRECTORY_NAMES: &[&str] = &[];
 const DEFAULT_SKIP_FILE_NAMES: &[&str] = &[];
+const DEFAULT_SKIP_FINGERPRINTS: &[&str] = &[];
 const DEFAULT_SKIP_GLOB: &[&str] = &[];
 const DEFAULT_SKIP_VCS_IGNORED: bool = true;
 const DEFAULT_VERBOSE: bool = false;
+
+#[cfg(feature = "git-history")]
+const DEEP_VALUES: &[&str] = &["false", "true", "history-only"];
 
 /// A glob pattern paired with the directory it should be evaluated
 /// against. The pattern matches files whose paths, taken relative to
@@ -162,17 +173,52 @@ pub fn output_format_names_csv() -> String {
     .join(", ")
 }
 
+#[cfg(feature = "git-history")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeepMode {
+  Off,
+  Full,
+  HistoryOnly,
+}
+
+#[cfg(feature = "git-history")]
+impl DeepMode {
+  pub fn from_str(s: &str) -> Option<Self> {
+    match s {
+      "false" => Some(Self::Off),
+      "true" => Some(Self::Full),
+      "history-only" => Some(Self::HistoryOnly),
+      _ => None,
+    }
+  }
+
+  pub fn scans_working_tree(&self) -> bool {
+    matches!(self, Self::Off | Self::Full)
+  }
+
+  pub fn scans_history(&self) -> bool {
+    matches!(self, Self::Full | Self::HistoryOnly)
+  }
+}
+
 #[derive(Clone)]
 pub struct Options {
   pub auto_excludes: bool,
   #[cfg(feature = "cache")]
   pub cache_directory: Option<String>,
   pub color: Option<bool>,
+  #[cfg(feature = "git-history")]
+  pub deep: DeepMode,
   pub output_file: String,
   pub output_format: OutputFormat,
   pub show_summary: bool,
+  #[cfg(feature = "git-history")]
+  pub skip_commits: Vec<String>,
+  #[cfg(feature = "git-history")]
+  pub skip_commits_up_to: Option<String>,
   pub skip_directory_names: Vec<ScopedName>,
   pub skip_file_names: Vec<ScopedName>,
+  pub skip_fingerprints: Vec<Fingerprint>,
   pub skip_glob: Vec<ScopedGlob>,
   pub skip_vcs_ignored: bool,
   pub verbose: bool,
@@ -185,11 +231,18 @@ impl Default for Options {
       #[cfg(feature = "cache")]
       cache_directory: None,
       color: DEFAULT_COLOR,
+      #[cfg(feature = "git-history")]
+      deep: DeepMode::Off,
       output_file: DEFAULT_OUTPUT_FILE.to_owned(),
       output_format: DEFAULT_OUTPUT_FORMAT,
       show_summary: DEFAULT_SHOW_SUMMARY,
+      #[cfg(feature = "git-history")]
+      skip_commits: Vec::new(),
+      #[cfg(feature = "git-history")]
+      skip_commits_up_to: None,
       skip_directory_names: Vec::new(),
       skip_file_names: Vec::new(),
+      skip_fingerprints: Vec::new(),
       skip_glob: Vec::new(),
       skip_vcs_ignored: DEFAULT_SKIP_VCS_IGNORED,
       verbose: DEFAULT_VERBOSE,
@@ -265,6 +318,19 @@ impl Options {
             self.set_bool(spec.name, value == "true");
             ApplyArgOutcome::Applied
           }
+          #[cfg(feature = "git-history")]
+          DefaultValue::Enum { values, .. } => {
+            if !values.contains(&value) {
+              eprintln!(
+                "Invalid value for --{}: \"{value}\". Valid values: {}.",
+                spec.name,
+                values.join(", ")
+              );
+              return ApplyArgOutcome::Error;
+            }
+            self.set_enum(spec.name, value);
+            ApplyArgOutcome::Applied
+          }
           DefaultValue::String(_) => match self.set_string(spec.name, value) {
             None => ApplyArgOutcome::Applied,
             Some(ParseResult::Error) => ApplyArgOutcome::Error,
@@ -274,6 +340,26 @@ impl Options {
             Some(ParseResult::Run { .. }) => ApplyArgOutcome::Applied,
           },
           DefaultValue::StringList(_) => {
+            #[cfg(feature = "git-history")]
+            if spec.name == SKIP_COMMITS.name {
+              let entries: Vec<&str> =
+                value.split(',').map(str::trim).collect();
+              if entries.iter().any(|s| s.is_empty()) {
+                eprintln!(
+                  "--{} has an empty entry. Use a comma-separated list of \
+commits such as a1b2c3d4e5f6,0f9e8d7c6b5a.",
+                  SKIP_COMMITS.name
+                );
+                return ApplyArgOutcome::Error;
+              }
+              self.set_string_list(
+                spec.name,
+                entries.into_iter().map(String::from).collect(),
+                anchor,
+                None,
+              );
+              return ApplyArgOutcome::Applied;
+            }
             self.set_string_list(
               spec.name,
               value
@@ -290,13 +376,18 @@ impl Options {
         };
       }
 
-      // Bare --flag (no =value) is valid for booleans, sets to true.
       if rest == spec.name {
-        if let DefaultValue::Bool(_) | DefaultValue::AutoBool(_) =
-          spec.default_value
-        {
-          self.set_bool(spec.name, true);
-          return ApplyArgOutcome::Applied;
+        match spec.default_value {
+          DefaultValue::Bool(_) | DefaultValue::AutoBool(_) => {
+            self.set_bool(spec.name, true);
+            return ApplyArgOutcome::Applied;
+          }
+          #[cfg(feature = "git-history")]
+          DefaultValue::Enum { bare: Some(b), .. } => {
+            self.set_enum(spec.name, b);
+            return ApplyArgOutcome::Applied;
+          }
+          _ => {}
         }
       }
     }
@@ -307,6 +398,16 @@ impl Options {
   pub fn apply_args(&mut self, args: &[String], anchor: &Path) {
     for arg in args {
       let _ = self.apply_arg(arg, anchor);
+    }
+  }
+
+  #[cfg(feature = "git-history")]
+  fn set_enum(&mut self, name: &str, value: &str) {
+    #[cfg(feature = "git-history")]
+    if name == DEEP.name {
+      if let Some(mode) = DeepMode::from_str(value) {
+        self.deep = mode;
+      }
     }
   }
 
@@ -325,6 +426,21 @@ impl Options {
   }
 
   fn set_string(&mut self, name: &str, value: &str) -> Option<ParseResult> {
+    #[cfg(feature = "git-history")]
+    if name == SKIP_COMMITS_UP_TO.name {
+      if value.is_empty() {
+        eprintln!(
+          "--{} needs a value: a date such as 2026-03-25, a date and time \
+such as 2026-03-25T11:02:39Z or Wed Mar 25 13:02:39 2026 +0200, or a commit \
+such as a1b2c3d4e5f6.",
+          SKIP_COMMITS_UP_TO.name
+        );
+        return Some(ParseResult::Error);
+      }
+      self.skip_commits_up_to = Some(value.to_owned());
+      return None;
+    }
+
     #[cfg(feature = "cache")]
     if name == CACHE_DIRECTORY.name {
       self.cache_directory = Some(value.to_owned());
@@ -354,6 +470,16 @@ impl Options {
     anchor: &Path,
     rc_file: Option<&Path>,
   ) {
+    #[cfg(feature = "git-history")]
+    if name == SKIP_COMMITS.name {
+      for commit in value {
+        if !self.skip_commits.contains(&commit) {
+          self.skip_commits.push(commit);
+        }
+      }
+      return;
+    }
+
     if name == SKIP_GLOB.name {
       let anchor = anchor.to_path_buf();
       for pattern in value {
@@ -373,6 +499,14 @@ impl Options {
       add_scoped_names(&mut self.skip_directory_names, anchor, value, rc_file);
     } else if name == SKIP_FILE_NAMES.name {
       add_scoped_names(&mut self.skip_file_names, anchor, value, rc_file);
+    } else if name == SKIP_FINGERPRINTS.name {
+      for entry in value {
+        if let Some(fingerprint) = Fingerprint::parse(&entry) {
+          if !self.skip_fingerprints.contains(&fingerprint) {
+            self.skip_fingerprints.push(fingerprint);
+          }
+        }
+      }
     }
   }
 
@@ -395,6 +529,19 @@ impl Options {
         DefaultValue::Bool(_) | DefaultValue::AutoBool(_) => {
           if let Some(v) = item.as_bool() {
             self.set_bool(spec.name, v);
+          }
+        }
+        #[cfg(feature = "git-history")]
+        DefaultValue::Enum { values, .. } => {
+          if let Some(v) = item.as_str() {
+            if values.contains(&v) {
+              self.set_enum(spec.name, v);
+            }
+          } else if let Some(b) = item.as_bool() {
+            let v = if b { "true" } else { "false" };
+            if values.contains(&v) {
+              self.set_enum(spec.name, v);
+            }
           }
         }
         DefaultValue::String(_) => {
@@ -464,6 +611,10 @@ pub fn print_help() {
       DefaultValue::Bool(_) | DefaultValue::AutoBool(_) => {
         format!("  --{}[=<value>]", spec.name)
       }
+      #[cfg(feature = "git-history")]
+      DefaultValue::Enum { bare: Some(_), .. } => {
+        format!("  --{}[=<value>]", spec.name)
+      }
       _ => format!("  --{}=<value>", spec.name),
     })
     .collect();
@@ -520,6 +671,15 @@ pub fn print_help() {
         } else {
           format!("{description} Default: {}.", v.join(","))
         }
+      }
+      #[cfg(feature = "git-history")]
+      DefaultValue::Enum {
+        values, default, ..
+      } => {
+        format!(
+          "{description} Default: {default}. Valid values: {}.",
+          values.join(", ")
+        )
       }
     };
     print_option(col, &text, indent, term_width);
@@ -578,6 +738,12 @@ pub struct OptionSpec {
 pub enum DefaultValue {
   Bool(bool),
   AutoBool(&'static str),
+  #[cfg(feature = "git-history")]
+  Enum {
+    values: &'static [&'static str],
+    default: &'static str,
+    bare: Option<&'static str>,
+  },
   String(&'static str),
   StringList(&'static [&'static str]),
 }
@@ -593,6 +759,17 @@ pub const AUTO_EXCLUDES: OptionSpec = OptionSpec {
   name: "auto-excludes",
   description: "Skip known vendor, cache, build, and metadata paths.",
   default_value: DefaultValue::Bool(DEFAULT_AUTO_EXCLUDES),
+};
+
+#[cfg(feature = "git-history")]
+pub const DEEP: OptionSpec = OptionSpec {
+  name: "deep",
+  description: "Also scan reachable git history (all branches, tags, remotes, stash, plus dangling objects). Use \"history-only\" to only scan the history.",
+  default_value: DefaultValue::Enum {
+    values: DEEP_VALUES,
+    default: DEFAULT_DEEP,
+    bare: Some("true"),
+  },
 };
 
 pub const OUTPUT_FILE: OptionSpec = OptionSpec {
@@ -619,6 +796,20 @@ pub const SHOW_SUMMARY: OptionSpec = OptionSpec {
   default_value: DefaultValue::Bool(DEFAULT_SHOW_SUMMARY),
 };
 
+#[cfg(feature = "git-history")]
+pub const SKIP_COMMITS: OptionSpec = OptionSpec {
+  name: "skip-commits",
+  description: "When scanning git history, skip findings in these specific commits, comma-separated. Only the listed commits are skipped, not the rest of their history.",
+  default_value: DefaultValue::StringList(DEFAULT_SKIP_COMMITS),
+};
+
+#[cfg(feature = "git-history")]
+pub const SKIP_COMMITS_UP_TO: OptionSpec = OptionSpec {
+  name: "skip-commits-up-to",
+  description: "When scanning git history, skip findings in commits up to and including this point: a date and optional time or a commit. The specified commit and all earlier commits are skipped.",
+  default_value: DefaultValue::String(DEFAULT_SKIP_COMMITS_UP_TO),
+};
+
 pub const SKIP_DIRECTORY_NAMES: OptionSpec = OptionSpec {
   name: "skip-directory-names",
   description: "Skip directories with these names, relative to the current directory, comma-separated.",
@@ -629,6 +820,12 @@ pub const SKIP_FILE_NAMES: OptionSpec = OptionSpec {
   name: "skip-file-names",
   description: "Skip files with these names, relative to the current directory, comma-separated.",
   default_value: DefaultValue::StringList(DEFAULT_SKIP_FILE_NAMES),
+};
+
+pub const SKIP_FINGERPRINTS: OptionSpec = OptionSpec {
+  name: "skip-fingerprints",
+  description: "Skip findings with these fingerprints, comma-separated.",
+  default_value: DefaultValue::StringList(DEFAULT_SKIP_FINGERPRINTS),
 };
 
 pub const SKIP_GLOB: OptionSpec = OptionSpec {
@@ -653,12 +850,19 @@ pub const OPTION_SPECS: &[OptionSpec] = &[
   AUTO_EXCLUDES,
   #[cfg(feature = "cache")]
   CACHE_DIRECTORY,
+  #[cfg(feature = "git-history")]
+  DEEP,
   OUTPUT_FILE,
   OUTPUT_FORMAT,
   COLOR,
   SHOW_SUMMARY,
+  #[cfg(feature = "git-history")]
+  SKIP_COMMITS,
+  #[cfg(feature = "git-history")]
+  SKIP_COMMITS_UP_TO,
   SKIP_DIRECTORY_NAMES,
   SKIP_FILE_NAMES,
+  SKIP_FINGERPRINTS,
   SKIP_GLOB,
   SKIP_VCS_IGNORED,
   VERBOSE,

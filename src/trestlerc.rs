@@ -261,6 +261,27 @@ fn check_value(spec: &OptionSpec, item: &Item) -> Option<String> {
         }
       }
     },
+    #[cfg(feature = "git-history")]
+    DefaultValue::Enum { values, .. } => {
+      if item.as_bool().is_some() {
+        None
+      } else if let Some(value) = item.as_str() {
+        if values.contains(&value) {
+          None
+        } else {
+          Some(format!(
+            "Option `{}` must be one of: {}.",
+            spec.name,
+            values.join(", ")
+          ))
+        }
+      } else {
+        Some(format!(
+          "Option `{}` expects a string or boolean.",
+          spec.name
+        ))
+      }
+    }
   }
 }
 
@@ -323,6 +344,16 @@ fn value_completions(spec: &OptionSpec) -> Vec<Completion> {
         documentation: String::new(),
       })
       .collect(),
+    #[cfg(feature = "git-history")]
+    DefaultValue::Enum { values, .. } => values
+      .iter()
+      .map(|v| Completion {
+        label: format!("\"{v}\""),
+        kind: CompletionKind::Value,
+        detail: "string".to_owned(),
+        documentation: String::new(),
+      })
+      .collect(),
     _ => Vec::new(),
   }
 }
@@ -332,6 +363,8 @@ fn type_label(default: &DefaultValue) -> &'static str {
     DefaultValue::Bool(_) | DefaultValue::AutoBool(_) => "boolean",
     DefaultValue::String(_) => "string",
     DefaultValue::StringList(_) => "array of strings",
+    #[cfg(feature = "git-history")]
+    DefaultValue::Enum { .. } => "string",
   }
 }
 
@@ -347,6 +380,8 @@ fn spec_markdown(spec: &OptionSpec) -> String {
         list.iter().map(|s| format!("\"{s}\"")).collect();
       format!("[{}]", items.join(", "))
     }
+    #[cfg(feature = "git-history")]
+    DefaultValue::Enum { default, .. } => format!("\"{default}\""),
   };
 
   format!(

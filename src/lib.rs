@@ -6,8 +6,11 @@ pub mod data;
 pub mod diagnostic;
 pub mod directives;
 pub mod exit;
+pub mod fingerprint;
 pub mod formatting;
 pub mod git;
+#[cfg(feature = "git-history")]
+pub mod history;
 pub mod install;
 pub mod languages;
 #[cfg(feature = "lsp")]

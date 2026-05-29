@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Sender};
 use std::{env::args, fs::canonicalize};
 
-use trestle::diagnostic::Diagnostic;
+use trestle::diagnostic::AnnotatedDiagnostic;
 use trestle::exit::{EXIT_CODE_ERROR, exit_with_error, exit_with_findings};
 #[cfg(feature = "lsp")]
 use trestle::lsp;
@@ -194,13 +194,35 @@ fn run_scans(bases: &[ScanContext], targets: &[ScanTarget]) -> ScanSummary {
     let mut total = 0;
 
     for (base, target) in bases.iter().zip(targets.iter()) {
-      total += scan_one(base, sender.clone(), |ctx| {
-        if let Some(file) = &target.explicit_file {
-          process_files_with_surrounding_context(ctx, &[file.clone()]);
-        } else {
-          process_dir(ctx, &base.abs_dir);
+      #[cfg(feature = "git-history")]
+      let scan_working_tree = base.options.deep.scans_working_tree();
+      #[cfg(not(feature = "git-history"))]
+      let scan_working_tree = true;
+      #[cfg(feature = "git-history")]
+      let history_state = build_history_state(base);
+
+      if scan_working_tree {
+        total += scan_one(
+          base,
+          sender.clone(),
+          #[cfg(feature = "git-history")]
+          history_state.as_ref().map(|(_, map)| map.clone()),
+          |ctx| {
+            if let Some(file) = &target.explicit_file {
+              process_files_with_surrounding_context(ctx, &[file.clone()]);
+            } else {
+              process_dir(ctx, &base.abs_dir);
+            }
+          },
+        );
+      }
+
+      #[cfg(feature = "git-history")]
+      if base.options.deep.scans_history() {
+        if let Some((walker, map)) = history_state {
+          total += scan_remaining_blobs(base, sender.clone(), walker, map);
         }
-      });
+      }
     }
 
     total
@@ -216,13 +238,19 @@ fn run_scans_on_files(
     let mut total = 0;
 
     for base in bases {
-      total += scan_one(base, sender.clone(), |ctx| {
-        if with_context {
-          process_files_with_surrounding_context(ctx, files);
-        } else {
-          process_files(ctx, files);
-        }
-      });
+      total += scan_one(
+        base,
+        sender.clone(),
+        #[cfg(feature = "git-history")]
+        None,
+        |ctx| {
+          if with_context {
+            process_files_with_surrounding_context(ctx, files);
+          } else {
+            process_files(ctx, files);
+          }
+        },
+      );
     }
 
     total
@@ -231,7 +259,7 @@ fn run_scans_on_files(
 
 fn with_writer(
   bases: &[ScanContext],
-  f: impl FnOnce(&Sender<Diagnostic>) -> usize,
+  f: impl FnOnce(&Sender<AnnotatedDiagnostic>) -> usize,
 ) -> ScanSummary {
   let (diagnostic_sender, diagnostic_receiver) = mpsc::channel();
   let (scan_stats_sender, scan_stats_receiver) = mpsc::channel();
@@ -290,12 +318,68 @@ fn with_writer(
   }
 }
 
+#[cfg(feature = "git-history")]
+fn build_history_state(
+  base: &ScanContext,
+) -> Option<(
+  trestle::history::HistoryWalker,
+  trestle::processing::HistoryMap,
+)> {
+  use std::collections::HashMap;
+  use std::sync::Mutex as StdMutex;
+  use trestle::history::HistoryWalker;
+
+  if base.options.deep == trestle::options::DeepMode::Off {
+    return None;
+  }
+
+  let walker = HistoryWalker::open(&base.abs_dir)?;
+  let blobs = match walker.collect_blobs_with_options(&base.options) {
+    Ok(blobs) => blobs,
+    Err(message) => exit_with_error(format!("Error: {message}")),
+  };
+  let map: HashMap<_, _> = blobs.into_iter().map(|b| (b.oid, b)).collect();
+
+  Some((walker, Arc::new(StdMutex::new(map))))
+}
+
+#[cfg(feature = "git-history")]
+fn scan_remaining_blobs(
+  base: &ScanContext,
+  sender: Sender<AnnotatedDiagnostic>,
+  walker: trestle::history::HistoryWalker,
+  map: trestle::processing::HistoryMap,
+) -> usize {
+  let occurrences: Vec<_> = match map.lock() {
+    Ok(mut guard) => guard.drain().map(|(_, occ)| occ).collect(),
+    Err(_) => return 0,
+  };
+  if occurrences.is_empty() {
+    return 0;
+  }
+
+  let run_context = base.make_run_context_no_cache(sender);
+
+  for occurrence in occurrences {
+    trestle::processing::scan_history_blob(&run_context, &walker, &occurrence);
+  }
+
+  run_context.scanned_file_count.load(Ordering::Relaxed)
+}
+
 fn scan_one(
   base: &ScanContext,
-  sender: Sender<Diagnostic>,
+  sender: Sender<AnnotatedDiagnostic>,
+  #[cfg(feature = "git-history")] history_map: Option<
+    trestle::processing::HistoryMap,
+  >,
   scan: impl FnOnce(&RunContext),
 ) -> usize {
-  let run_context = base.make_run_context(sender);
+  let run_context = base.make_run_context(
+    sender,
+    #[cfg(feature = "git-history")]
+    history_map,
+  );
 
   scan(&run_context);
 

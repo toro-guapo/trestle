@@ -104,6 +104,57 @@ pub fn pluralize<'a>(
   if count == 1 { singular } else { plural }
 }
 
+pub fn sanitize_subject(input: &str) -> String {
+  let mut out = String::with_capacity(input.len());
+
+  for c in input.chars() {
+    let keep = c == ' '
+      || c == '\t'
+      || (!c.is_control()
+        && (c.is_alphanumeric() || c.is_ascii_punctuation())
+        && !is_unicode_format_mark(c));
+
+    if keep {
+      out.push(c);
+    }
+  }
+
+  let trimmed = out.trim();
+  trimmed.to_owned()
+}
+
+fn is_unicode_format_mark(c: char) -> bool {
+  matches!(
+    c,
+    '\u{200B}' // zero-width space
+    | '\u{200C}' // ZWNJ
+    | '\u{200D}' // ZWJ
+    | '\u{200E}' // LRM
+    | '\u{200F}' // RLM
+    | '\u{202A}'
+      ..='\u{202E}' // bidi embedding/override
+    | '\u{2060}' // word joiner
+    | '\u{FEFF}' // BOM / ZWNBSP
+  )
+}
+
+pub fn truncate_with_ellipsis(text: &str, max: usize) -> String {
+  if text.chars().count() <= max {
+    return text.to_owned();
+  }
+
+  let ellipsis = " ...";
+  let ellipsis_len = ellipsis.chars().count();
+  if max <= ellipsis_len {
+    return text.chars().take(max).collect();
+  }
+
+  let kept = max - ellipsis_len;
+  let head: String = text.chars().take(kept).collect();
+
+  format!("{head}{ellipsis}")
+}
+
 pub fn trim_in_place(s: &mut String) {
   let start = s.len() - s.trim_start().len();
   let new_len = s.trim().len();

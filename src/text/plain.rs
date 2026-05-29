@@ -70,6 +70,18 @@ fn write_span(
       out.push_str(s);
       out.push('`');
     }
+    TextSpan::CodeBlock { lines, .. } => {
+      for (i, line) in lines.iter().enumerate() {
+        if i == 0 {
+          out.push_str("\n\n");
+        } else {
+          out.push('\n');
+        }
+
+        out.push_str(indent);
+        out.push_str(line);
+      }
+    }
     TextSpan::Filename(s) => out.push_str(s),
     TextSpan::Heading(s) => {
       out.push_str("\n\n");

@@ -23,6 +23,25 @@ fn write_span(out: &mut String, span: &TextSpan, indent: &str) {
   match span {
     TextSpan::Plain(s) => out.push_str(&escape(s)),
     TextSpan::Code(s) => out.push_str(&render_code(s)),
+    TextSpan::CodeBlock { language, lines } => {
+      out.push_str("\n\n");
+      out.push_str(indent);
+      out.push_str("```");
+
+      if let Some(lang) = language {
+        out.push_str(lang);
+      }
+
+      for line in lines {
+        out.push('\n');
+        out.push_str(indent);
+        out.push_str(line);
+      }
+
+      out.push('\n');
+      out.push_str(indent);
+      out.push_str("```");
+    }
     TextSpan::Filename(s) => out.push_str(&render_code(s)),
     TextSpan::Heading(s) => {
       out.push_str("\n\n");

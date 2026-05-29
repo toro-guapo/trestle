@@ -1139,9 +1139,26 @@ pub fn is_known_words(value: &NormalizedValue, local_words: &[&str]) -> bool {
     let is_known =
       |s: &str| set.contains(s) || local_words.iter().any(|w| *w == s);
 
-    let matched = alphabetic.iter().filter(|s| is_known(s.as_str())).count();
-    if matched >= alphabetic.len() || matched >= KNOWN_WORD_THRESHOLD {
+    let matched: Vec<&str> = alphabetic
+      .iter()
+      .map(|s| s.as_str())
+      .filter(|s| is_known(s))
+      .collect();
+
+    if matched.len() == alphabetic.len()
+      || matched.len() >= KNOWN_WORD_THRESHOLD
+    {
       return true;
+    }
+
+    if matched.len() >= 2 {
+      let matched_chars: usize = matched.iter().map(|s| s.len()).sum();
+      let total_chars: usize = alphabetic.iter().map(|s| s.len()).sum();
+      if total_chars > 0
+        && (matched_chars as f64) / (total_chars as f64) >= KNOWN_WORD_COVERAGE
+      {
+        return true;
+      }
     }
 
     if alphabetic.len() == 1 {

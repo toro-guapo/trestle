@@ -1,5 +1,8 @@
 use crate::{
-  diagnostic::{AssignmentType, Diagnostic, Severity, SourceFileSpan},
+  diagnostic::{
+    AssignmentType, Diagnostic, Severity, SourceFileSpan,
+    assignment_fingerprint,
+  },
   processing::SourceContext,
   secrets::values::{
     classify::{NamedSecret, ValueClass, classify_value},
@@ -92,6 +95,7 @@ fn check_basic_auth(
       source_span: resolve_span(),
       severity: Severity::Warning,
       file_type: context.file_type,
+      fingerprint: assignment_fingerprint(normalized.original().as_bytes()),
     });
   }
 
@@ -118,6 +122,7 @@ fn check_token_value(
       source_span: resolve_span(),
       severity: Severity::Warning,
       file_type: context.file_type,
+      fingerprint: assignment_fingerprint(normalized.original().as_bytes()),
     });
   }
 
@@ -144,6 +149,7 @@ fn check_header_value(
       source_span: resolve_span(),
       severity: Severity::Warning,
       file_type: context.file_type,
+      fingerprint: assignment_fingerprint(normalized.original().as_bytes()),
     });
   }
 

@@ -1,7 +1,9 @@
 use serde_json::json;
 
-use crate::diagnostic::Diagnostic;
+use crate::diagnostic::{AnnotatedDiagnostic, Diagnostic};
 use crate::formatting::uppercase_first;
+#[cfg(feature = "git-history")]
+use crate::output::history_to_json;
 use crate::output::{
   SUMMARY_FIELDS, ScanSummary, WriteContext, build_summary, count,
   write_indented_json,
@@ -57,12 +59,13 @@ fn build_summary_value(
   serde_json::Value::Object(map)
 }
 
-fn diagnostic_to_json(diagnostic: &Diagnostic) -> serde_json::Value {
-  let rule_id = diagnostic.id();
-  let severity = diagnostic.severity().to_string().to_lowercase();
-  let message = diagnostic.message();
+fn diagnostic_to_json(annotated: &AnnotatedDiagnostic) -> serde_json::Value {
+  let rule_id = annotated.id();
+  let severity = annotated.severity().to_string().to_lowercase();
+  let message = annotated.message();
 
-  match diagnostic {
+  #[allow(unused_mut)]
+  let mut obj = match &annotated.diagnostic {
     Diagnostic::SecretAssignment {
       name,
       assignment_type,
@@ -125,7 +128,16 @@ fn diagnostic_to_json(diagnostic: &Diagnostic) -> serde_json::Value {
       add_path(&mut obj, file_abs_path.as_path());
       obj
     }
+  };
+
+  obj["fingerprint"] = json!(annotated.fingerprint().as_str());
+
+  #[cfg(feature = "git-history")]
+  if let Some(history) = &annotated.history {
+    obj["history"] = history_to_json(history);
   }
+
+  obj
 }
 
 fn add_path(obj: &mut serde_json::Value, path: &std::path::Path) {

@@ -5,7 +5,7 @@ use quick_xml::events::{
   BytesCData, BytesDecl, BytesEnd, BytesStart, BytesText, Event,
 };
 
-use crate::diagnostic::Diagnostic;
+use crate::diagnostic::{AnnotatedDiagnostic, Diagnostic};
 use crate::output::{
   SUMMARY_FIELDS, ScanStats, ScanSummary, WriteContext, build_summary, count,
 };
@@ -13,7 +13,7 @@ use crate::output::{
 pub fn write(ctx: WriteContext<'_>) -> ScanSummary {
   let mut summary = ScanSummary::default();
 
-  let diagnostics: Vec<Diagnostic> = ctx
+  let diagnostics: Vec<AnnotatedDiagnostic> = ctx
     .diagnostic_receiver
     .into_iter()
     .inspect(|d| count(&mut summary, d))
@@ -34,7 +34,7 @@ pub fn write(ctx: WriteContext<'_>) -> ScanSummary {
 
 fn emit_xml(
   writer: &mut dyn io::Write,
-  diagnostics: &[Diagnostic],
+  diagnostics: &[AnnotatedDiagnostic],
   summary: ScanSummary,
   show_summary: bool,
   stats: Option<ScanStats>,
@@ -72,14 +72,15 @@ fn emit_xml(
 
 fn write_testcase(
   xml: &mut Writer<&mut dyn io::Write>,
-  diagnostic: &Diagnostic,
+  diagnostic: &AnnotatedDiagnostic,
 ) {
   let mut testcase = BytesStart::new("testcase");
   testcase.push_attribute(("name", diagnostic_name(diagnostic).as_str()));
   testcase.push_attribute(("classname", diagnostic.id()));
+  testcase.push_attribute(("fingerprint", diagnostic.fingerprint().as_str()));
   if let Diagnostic::SecretAssignment {
     assignment_type, ..
-  } = diagnostic
+  } = &diagnostic.diagnostic
   {
     testcase
       .push_attribute(("assignmentType", assignment_type.to_string().as_str()));
@@ -129,8 +130,8 @@ fn write_property(
   xml.write_event(Event::Empty(tag)).ok();
 }
 
-fn diagnostic_name(diagnostic: &Diagnostic) -> String {
-  match diagnostic {
+fn diagnostic_name(diagnostic: &AnnotatedDiagnostic) -> String {
+  match &diagnostic.diagnostic {
     Diagnostic::SecretAssignment { source_span, .. }
     | Diagnostic::SecretValue { source_span, .. } => {
       source_span.display_start()

@@ -13,9 +13,16 @@ pub enum Text {
 pub enum TextSpan {
   Plain(String),
   Code(String),
+  CodeBlock {
+    language: Option<String>,
+    lines: Vec<String>,
+  },
   Filename(String),
   Heading(String),
-  Link { url: String, text: Option<Text> },
+  Link {
+    url: String,
+    text: Option<Text>,
+  },
   Paragraph(Vec<TextSpan>),
   UnorderedList(Vec<Text>),
   OrderedList(Vec<Text>),

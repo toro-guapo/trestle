@@ -292,7 +292,11 @@ fn build_scan_context(runner: &ToolRunner) -> ScanContext {
 fn initial_scan(runner: &ToolRunner) {
   let scan = build_scan_context(runner);
   let (diag_tx, diag_rx) = mpsc::channel();
-  let run = scan.make_run_context(diag_tx);
+  let run = scan.make_run_context(
+    diag_tx,
+    #[cfg(feature = "git-history")]
+    None,
+  );
   process_dir(&run, &runner.workspace);
   drop(run);
   for _ in diag_rx {}
@@ -326,7 +330,10 @@ fn run_scan_path_tool(runner: &ToolRunner, path: Option<&str>) -> String {
   }
   drop(run);
 
-  let diagnostics: Vec<Diagnostic> = diag_rx.into_iter().collect();
+  let diagnostics: Vec<Diagnostic> = diag_rx
+    .into_iter()
+    .map(|annotated| annotated.diagnostic)
+    .collect();
   format_diagnostics(runner, &diagnostics)
 }
 
@@ -362,7 +369,10 @@ fn run_scan_proposed_tool(
   run.flush_file_diagnostics();
   drop(run);
 
-  let diagnostics: Vec<Diagnostic> = diag_rx.into_iter().collect();
+  let diagnostics: Vec<Diagnostic> = diag_rx
+    .into_iter()
+    .map(|annotated| annotated.diagnostic)
+    .collect();
   format_diagnostics(runner, &diagnostics)
 }
 

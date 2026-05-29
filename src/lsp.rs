@@ -914,7 +914,11 @@ impl Workspace {
 
     {
       let scan = root.scan.borrow();
-      let run_context = scan.make_run_context(diag_tx);
+      let run_context = scan.make_run_context(
+        diag_tx,
+        #[cfg(feature = "git-history")]
+        None,
+      );
       process_dir(&run_context, &root.abs_dir);
       drop(run_context);
       scan.flush_cache();
@@ -923,7 +927,8 @@ impl Workspace {
     let mut by_uri: HashMap<Url, (Vec<LspDiagnostic>, Vec<HoverEntry>)> =
       HashMap::new();
 
-    for diagnostic in diag_rx {
+    for annotated in diag_rx {
+      let diagnostic = annotated.diagnostic;
       let path = diagnostic.file_abs_path().to_path_buf();
       let Ok(uri) = Url::from_file_path(&path) else {
         continue;
@@ -1034,7 +1039,8 @@ fn scan_in_root(
   let mut diagnostics = Vec::new();
   let hovers = Vec::new();
 
-  for diagnostic in diag_rx {
+  for annotated in diag_rx {
+    let diagnostic = annotated.diagnostic;
     let range = diagnostic_range(&diagnostic);
     diagnostics.push(to_lsp_diagnostic(diagnostic, range));
   }

@@ -5,7 +5,7 @@ use quick_xml::events::{
   BytesCData, BytesDecl, BytesEnd, BytesStart, BytesText, Event,
 };
 
-use crate::diagnostic::Diagnostic;
+use crate::diagnostic::{AnnotatedDiagnostic, Diagnostic};
 use crate::formatting::uppercase_first;
 use crate::output::{
   SUMMARY_FIELDS, ScanStats, ScanSummary, WriteContext, build_summary, count,
@@ -15,7 +15,7 @@ use crate::source::SourceFileSpan;
 pub fn write(ctx: WriteContext<'_>) -> ScanSummary {
   let mut summary = ScanSummary::default();
 
-  let diagnostics: Vec<Diagnostic> = ctx
+  let diagnostics: Vec<AnnotatedDiagnostic> = ctx
     .diagnostic_receiver
     .into_iter()
     .inspect(|d| count(&mut summary, d))
@@ -36,7 +36,7 @@ pub fn write(ctx: WriteContext<'_>) -> ScanSummary {
 
 fn emit_xml(
   writer: &mut dyn io::Write,
-  diagnostics: &[Diagnostic],
+  diagnostics: &[AnnotatedDiagnostic],
   summary: ScanSummary,
   show_summary: bool,
   stats: Option<ScanStats>,
@@ -76,7 +76,7 @@ fn emit_xml(
 
 fn write_diagnostic(
   xml: &mut Writer<&mut dyn io::Write>,
-  diagnostic: &Diagnostic,
+  diagnostic: &AnnotatedDiagnostic,
 ) {
   let rule_id = diagnostic.id();
   let severity = diagnostic.severity().to_string().to_lowercase();
@@ -85,8 +85,9 @@ fn write_diagnostic(
   let mut tag = BytesStart::new("diagnostic");
   tag.push_attribute(("ruleId", rule_id));
   tag.push_attribute(("severity", severity.as_str()));
+  tag.push_attribute(("fingerprint", diagnostic.fingerprint().as_str()));
 
-  match diagnostic {
+  match &diagnostic.diagnostic {
     Diagnostic::SecretAssignment {
       name,
       assignment_type,

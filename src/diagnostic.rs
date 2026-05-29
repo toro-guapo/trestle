@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use crate::fingerprint::Fingerprint;
 use crate::formatting::uppercase_first;
 use crate::languages::FileType;
 use crate::processing::SourceContext;
@@ -112,24 +113,28 @@ pub enum Diagnostic {
     source_span: SourceFileSpan,
     severity: Severity,
     file_type: Option<FileType>,
+    fingerprint: Fingerprint,
   },
   SecretValue {
     source_span: SourceFileSpan,
     value_class: ValueClass,
     severity: Severity,
     file_type: Option<FileType>,
+    fingerprint: Fingerprint,
   },
   BinarySecret {
     secret: BinarySecret,
     severity: Severity,
     file_type: Option<FileType>,
     file_abs_path: PathBuf,
+    fingerprint: Fingerprint,
   },
   TextSecret {
     secret: TextSecret,
     severity: Severity,
     file_type: Option<FileType>,
     file_abs_path: PathBuf,
+    fingerprint: Fingerprint,
   },
 }
 
@@ -188,6 +193,26 @@ impl Diagnostic {
     }
   }
 
+  pub fn fingerprint(&self) -> &Fingerprint {
+    match self {
+      Diagnostic::SecretAssignment { fingerprint, .. }
+      | Diagnostic::SecretValue { fingerprint, .. }
+      | Diagnostic::BinarySecret { fingerprint, .. }
+      | Diagnostic::TextSecret { fingerprint, .. } => fingerprint,
+    }
+  }
+
+  /// Lowercase noun phrase describing what kind of secret this is, suitable
+  /// for mid-sentence use ("can read the {kind}").
+  pub fn secret_kind(&self) -> String {
+    match self {
+      Diagnostic::SecretAssignment { value_class, .. }
+      | Diagnostic::SecretValue { value_class, .. } => value_class.to_string(),
+      Diagnostic::BinarySecret { secret, .. } => secret.to_string(),
+      Diagnostic::TextSecret { secret, .. } => secret.to_string(),
+    }
+  }
+
   pub fn description(&self) -> &'static str {
     match self {
       Diagnostic::SecretAssignment { .. } => RULES[0].1,
@@ -230,6 +255,22 @@ impl std::fmt::Display for Diagnostic {
       ),
     }
   }
+}
+
+pub fn assignment_fingerprint(secret: &[u8]) -> Fingerprint {
+  Fingerprint::compute(RULES[0].0, secret)
+}
+
+pub fn value_fingerprint(secret: &[u8]) -> Fingerprint {
+  Fingerprint::compute(RULES[1].0, secret)
+}
+
+pub fn binary_fingerprint(secret: &[u8]) -> Fingerprint {
+  Fingerprint::compute(RULES[2].0, secret)
+}
+
+pub fn text_fingerprint(secret: &[u8]) -> Fingerprint {
+  Fingerprint::compute(RULES[3].0, secret)
 }
 
 pub fn check_assignment(
@@ -277,6 +318,7 @@ pub fn check_assignment(
     source_span: resolve_span(),
     severity,
     file_type: context.file_type,
+    fingerprint: assignment_fingerprint(value.original().as_bytes()),
   })
 }
 
@@ -313,6 +355,7 @@ pub fn check_credential_assignment(
     source_span: resolve_span(),
     severity,
     file_type: context.file_type,
+    fingerprint: assignment_fingerprint(value.original().as_bytes()),
   })
 }
 
@@ -342,5 +385,158 @@ pub fn check_value(
     value_class,
     severity,
     file_type: context.file_type,
+    fingerprint: value_fingerprint(value.original().as_bytes()),
   })
+}
+
+#[cfg(feature = "git-history")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HistoryLocation {
+  Branch { name: String, current: bool },
+  RemoteRef(String),
+  Tag(String),
+  Stash,
+  Dangling,
+}
+
+#[cfg(feature = "git-history")]
+impl HistoryLocation {
+  pub fn qualifier(&self) -> Option<String> {
+    match self {
+      Self::Branch { current: true, .. } => None,
+      Self::Branch {
+        name,
+        current: false,
+      } => Some(format!("on {name}")),
+      Self::RemoteRef(name) => Some(format!("on {name}")),
+      Self::Tag(name) => Some(format!("on tag {name}")),
+      Self::Stash => Some("in stash".to_owned()),
+      Self::Dangling => Some("dangling".to_owned()),
+    }
+  }
+}
+
+#[cfg(feature = "git-history")]
+pub const SHORT_COMMIT_LEN: usize = 12;
+
+#[cfg(feature = "git-history")]
+#[derive(Debug, Clone)]
+pub struct HistoryCommit {
+  pub commit: String,
+  pub author_time: chrono::DateTime<chrono::FixedOffset>,
+  pub subject: String,
+}
+
+#[cfg(feature = "git-history")]
+impl HistoryCommit {
+  pub fn short_commit(&self) -> &str {
+    self.commit.get(..SHORT_COMMIT_LEN).unwrap_or(&self.commit)
+  }
+}
+
+#[cfg(feature = "git-history")]
+#[derive(Debug, Clone)]
+pub struct HistoryAttribution {
+  pub commit: String,
+  pub author_date: chrono::NaiveDate,
+  pub location: HistoryLocation,
+  pub also_in_working_tree: bool,
+  pub commits: Vec<HistoryCommit>,
+}
+
+#[cfg(feature = "git-history")]
+impl HistoryAttribution {
+  pub fn short_commit(&self) -> &str {
+    self.commit.get(..SHORT_COMMIT_LEN).unwrap_or(&self.commit)
+  }
+}
+
+#[cfg(feature = "git-history")]
+impl std::fmt::Display for HistoryAttribution {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    let prefix = if self.also_in_working_tree {
+      "also "
+    } else {
+      ""
+    };
+
+    let short = self.short_commit();
+    let date = self.author_date;
+
+    if let HistoryLocation::Dangling = self.location {
+      return write!(f, "({prefix}in a dangling commit since {short}, {date})");
+    }
+
+    match self.location.qualifier() {
+      Some(loc) => {
+        write!(f, "({prefix}in history since {short} {loc}, {date})")
+      }
+      None => write!(f, "({prefix}in history since {short}, {date})"),
+    }
+  }
+}
+
+#[derive(Debug)]
+pub struct AnnotatedDiagnostic {
+  pub diagnostic: Diagnostic,
+  #[cfg(feature = "git-history")]
+  pub history: Option<HistoryAttribution>,
+}
+
+impl AnnotatedDiagnostic {
+  pub fn bare(diagnostic: Diagnostic) -> Self {
+    Self {
+      diagnostic,
+      #[cfg(feature = "git-history")]
+      history: None,
+    }
+  }
+
+  pub fn severity(&self) -> &Severity {
+    self.diagnostic.severity()
+  }
+
+  pub fn source_span(&self) -> Option<&SourceFileSpan> {
+    self.diagnostic.source_span()
+  }
+
+  pub fn file_abs_path(&self) -> &Path {
+    self.diagnostic.file_abs_path()
+  }
+
+  pub fn message(&self) -> String {
+    self.diagnostic.message()
+  }
+
+  pub fn id(&self) -> &'static str {
+    self.diagnostic.id()
+  }
+
+  pub fn fingerprint(&self) -> &Fingerprint {
+    self.diagnostic.fingerprint()
+  }
+
+  pub fn description(&self) -> &'static str {
+    self.diagnostic.description()
+  }
+
+  pub fn secret_kind(&self) -> String {
+    self.diagnostic.secret_kind()
+  }
+
+  #[cfg(feature = "git-history")]
+  pub fn display_history(&self) -> Option<String> {
+    self.history.as_ref().map(|h| h.to_string())
+  }
+}
+
+impl std::fmt::Display for AnnotatedDiagnostic {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(f, "{}", self.diagnostic)?;
+    #[cfg(feature = "git-history")]
+    if let Some(marker) = self.display_history() {
+      write!(f, " {marker}")?;
+    }
+    Ok(())
+  }
 }

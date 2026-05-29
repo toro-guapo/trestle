@@ -1,4 +1,4 @@
-use crate::diagnostic::{Diagnostic, Severity};
+use crate::diagnostic::{AnnotatedDiagnostic, Severity};
 use crate::formatting::format_count;
 use crate::output::{ScanSummary, WriteContext, build_summary, count};
 
@@ -62,7 +62,10 @@ fn split_line_column_suffix(location: &str) -> Option<(&str, &str)> {
   Some((&location[..suffix_start], &location[suffix_start..]))
 }
 
-fn render_diagnostic(diagnostic: &Diagnostic, use_color: bool) -> String {
+fn render_diagnostic(
+  diagnostic: &AnnotatedDiagnostic,
+  use_color: bool,
+) -> String {
   let severity_label = diagnostic.severity().to_string().to_uppercase();
   let severity = if use_color {
     match diagnostic.severity() {
@@ -79,7 +82,7 @@ fn render_diagnostic(diagnostic: &Diagnostic, use_color: bool) -> String {
 
   let message = diagnostic.message();
 
-  if let Some(source_span) = diagnostic.source_span() {
+  let line = if let Some(source_span) = diagnostic.source_span() {
     let location = source_span.display_start();
     let location = if use_color {
       if let Some((path, suffix)) = split_line_column_suffix(&location) {
@@ -94,6 +97,22 @@ fn render_diagnostic(diagnostic: &Diagnostic, use_color: bool) -> String {
   } else {
     let location = diagnostic.file_abs_path().display().to_string();
     format!("{severity} {location}: {message}")
+  };
+
+  #[cfg(feature = "git-history")]
+  let line = match diagnostic.display_history() {
+    Some(marker) if use_color => {
+      format!("{line} {ANSI_DIM}{marker}{ANSI_RESET}")
+    }
+    Some(marker) => format!("{line} {marker}"),
+    None => line,
+  };
+
+  let fingerprint = diagnostic.fingerprint();
+  if use_color {
+    format!("{line} {ANSI_DIM}[{fingerprint}]{ANSI_RESET}")
+  } else {
+    format!("{line} [{fingerprint}]")
   }
 }
 

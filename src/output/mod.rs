@@ -9,7 +9,9 @@ use std::io;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
-use crate::diagnostic::{Diagnostic, Severity};
+use crate::diagnostic::{AnnotatedDiagnostic, Severity};
+#[cfg(feature = "git-history")]
+use crate::diagnostic::{HistoryAttribution, HistoryLocation};
 use crate::formatting::format_count;
 use crate::options::{Options, OutputFormat};
 
@@ -27,7 +29,7 @@ pub struct ScanStats {
 }
 
 pub struct WriteContext<'a> {
-  pub diagnostic_receiver: Receiver<Diagnostic>,
+  pub diagnostic_receiver: Receiver<AnnotatedDiagnostic>,
   pub options: Options,
   pub output_is_terminal: bool,
   pub output_writer: &'a mut dyn io::Write,
@@ -97,7 +99,7 @@ pub fn write(write_context: WriteContext<'_>) -> ScanSummary {
   }
 }
 
-pub fn count(summary: &mut ScanSummary, diagnostic: &Diagnostic) {
+pub fn count(summary: &mut ScanSummary, diagnostic: &AnnotatedDiagnostic) {
   match diagnostic.severity() {
     Severity::Critical => {
       summary.critical_count = summary.critical_count.saturating_add(1);
@@ -157,6 +159,40 @@ pub fn build_summary(
     total_count: total,
     message,
   }
+}
+
+#[cfg(feature = "git-history")]
+pub fn history_to_json(history: &HistoryAttribution) -> serde_json::Value {
+  use serde_json::json;
+  let location = match &history.location {
+    HistoryLocation::Branch { name, current } => {
+      json!({ "type": "branch", "current": current, "name": name })
+    }
+    HistoryLocation::RemoteRef(name) => {
+      json!({ "type": "remoteRef", "name": name })
+    }
+    HistoryLocation::Tag(name) => json!({ "type": "tag", "name": name }),
+    HistoryLocation::Stash => json!({ "type": "stash" }),
+    HistoryLocation::Dangling => json!({ "type": "dangling" }),
+  };
+  let mut obj = json!({
+    "commit": history.commit,
+    "authorDate": history.author_date.to_string(),
+    "alsoInWorkingTree": history.also_in_working_tree,
+    "location": location,
+  });
+
+  if let (Some(oldest), Some(newest)) =
+    (history.commits.first(), history.commits.last())
+  {
+    obj["commits"] = json!({
+      "oldest": oldest.commit,
+      "newest": newest.commit,
+      "total": history.commits.len(),
+    });
+  }
+
+  obj
 }
 
 pub fn write_indented_json(

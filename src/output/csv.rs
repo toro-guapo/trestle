@@ -1,4 +1,4 @@
-use crate::diagnostic::Diagnostic;
+use crate::diagnostic::{AnnotatedDiagnostic, Diagnostic};
 use crate::formatting::uppercase_first;
 use crate::output::{ScanSummary, WriteContext, build_summary, count};
 
@@ -14,6 +14,7 @@ const HEADER: &[&str] = &[
   "Start Column",
   "End Line",
   "End Column",
+  "Fingerprint",
 ];
 
 pub fn write(ctx: WriteContext<'_>) -> ScanSummary {
@@ -39,12 +40,12 @@ pub fn write(ctx: WriteContext<'_>) -> ScanSummary {
   summary
 }
 
-fn build_row(diagnostic: &Diagnostic) -> Vec<String> {
-  let severity = diagnostic.severity().to_string().to_lowercase();
-  let rule_id = diagnostic.id();
-  let message = diagnostic.message();
+fn build_row(annotated: &AnnotatedDiagnostic) -> Vec<String> {
+  let severity = annotated.severity().to_string().to_lowercase();
+  let rule_id = annotated.id();
+  let message = annotated.message();
 
-  match diagnostic {
+  let mut row = match &annotated.diagnostic {
     Diagnostic::SecretAssignment {
       name,
       assignment_type,
@@ -123,7 +124,10 @@ fn build_row(diagnostic: &Diagnostic) -> Vec<String> {
       String::new(),
       String::new(),
     ],
-  }
+  };
+
+  row.push(annotated.fingerprint().as_str().to_owned());
+  row
 }
 
 fn extract_location(

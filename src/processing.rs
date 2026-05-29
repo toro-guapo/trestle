@@ -17,8 +17,18 @@ use std::sync::Arc;
 use crate::caching::{self, Cache};
 #[cfg(feature = "services")]
 use crate::scanning::{SERVICE_KEYWORDS, Service};
+#[cfg(feature = "git-history")]
+use std::collections::HashMap;
+
+#[cfg(feature = "git-history")]
+use crate::diagnostic::HistoryAttribution;
+#[cfg(feature = "git-history")]
+use crate::history::BlobOccurrence;
 use crate::{
-  diagnostic::{Diagnostic, Severity},
+  diagnostic::{
+    AnnotatedDiagnostic, Diagnostic, Severity, binary_fingerprint,
+    text_fingerprint, value_fingerprint,
+  },
   directives::DirectiveMap,
   git::{self, GitThreadHandle},
   languages::{self, FileType},
@@ -28,14 +38,19 @@ use crate::{
   trestlerc,
 };
 
+#[cfg(feature = "git-history")]
+pub type HistoryMap = Arc<Mutex<HashMap<gix::ObjectId, BlobOccurrence>>>;
+
 pub struct RunContext {
   pub abs_dir: PathBuf,
   pub options: Arc<Options>,
   pub options_resolver: Arc<trestlerc::OptionsResolver>,
   pub git_handle: Option<Mutex<GitThreadHandle>>,
-  pub diagnostic_sender: Sender<Diagnostic>,
+  pub diagnostic_sender: Sender<AnnotatedDiagnostic>,
   #[cfg(feature = "cache")]
   pub cache: Option<Arc<Cache>>,
+  #[cfg(feature = "git-history")]
+  pub history_map: Option<HistoryMap>,
   pub scanned_file_count: AtomicUsize,
   pub git_root: Option<PathBuf>,
   pub buffers_diagnostics: bool,
@@ -50,23 +65,119 @@ impl RunContext {
 thread_local! {
   static GIT_HANDLE: RefCell<Option<Option<GitThreadHandle>>> =
     const { RefCell::new(None) };
+
   static HAD_FINDINGS: Cell<bool> = const { Cell::new(false) };
-  static FILE_DIAGNOSTICS: RefCell<Vec<Diagnostic>> =
+
+  static FILE_DIAGNOSTICS: RefCell<Vec<AnnotatedDiagnostic>> =
     const { RefCell::new(Vec::new()) };
+}
+
+#[cfg(feature = "git-history")]
+thread_local! {
+  static CURRENT_HISTORY: RefCell<Option<HistoryAttribution>> =
+    const { RefCell::new(None) };
+}
+
+#[cfg(feature = "git-history")]
+pub fn with_history_attribution<R>(
+  attribution: HistoryAttribution,
+  f: impl FnOnce() -> R,
+) -> R {
+  CURRENT_HISTORY.with(|c| *c.borrow_mut() = Some(attribution));
+  let result = f();
+  CURRENT_HISTORY.with(|c| *c.borrow_mut() = None);
+  result
+}
+
+#[cfg(feature = "git-history")]
+pub fn scan_history_blob(
+  run_context: &RunContext,
+  walker: &crate::history::HistoryWalker,
+  occurrence: &crate::history::BlobOccurrence,
+) {
+  let virtual_root = walker
+    .workdir()
+    .map(|w| w.to_path_buf())
+    .unwrap_or_else(|| run_context.abs_dir.clone());
+  let virtual_path = virtual_root.join(&occurrence.path);
+
+  if is_path_statically_skipped(run_context, &virtual_path) {
+    return;
+  }
+
+  let Some(bytes) = walker.read_blob(occurrence.oid) else {
+    return;
+  };
+
+  let text = std::str::from_utf8(&bytes).ok();
+  let attribution = occurrence.attribution.clone();
+
+  with_history_attribution(attribution, || {
+    process_bytes(run_context, &virtual_path, &bytes, text);
+  });
+
+  run_context.flush_file_diagnostics();
+  run_context
+    .scanned_file_count
+    .fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(feature = "git-history")]
+fn take_matching_history(
+  run_context: &RunContext,
+  content: &[u8],
+) -> Option<HistoryAttribution> {
+  let map = run_context.history_map.as_ref()?;
+
+  let oid = gix::objs::compute_hash(
+    gix::hash::Kind::Sha1,
+    gix::objs::Kind::Blob,
+    content,
+  )
+  .ok()?;
+
+  let mut guard = map.lock().ok()?;
+  let mut occurrence = guard.remove(&oid)?;
+
+  occurrence.attribution.also_in_working_tree = true;
+
+  Some(occurrence.attribution)
 }
 
 impl RunContext {
   pub fn send_diagnostic(&self, diagnostic: Diagnostic) {
+    #[cfg(feature = "git-history")]
+    let annotated = AnnotatedDiagnostic {
+      diagnostic,
+      history: CURRENT_HISTORY.with(|c| c.borrow().clone()),
+    };
+    #[cfg(not(feature = "git-history"))]
+    let annotated = AnnotatedDiagnostic::bare(diagnostic);
+    self.send_annotated(annotated);
+  }
+
+  pub fn send_annotated(&self, annotated: AnnotatedDiagnostic) {
+    if self.is_fingerprint_skipped(&annotated) {
+      return;
+    }
+
     HAD_FINDINGS.with(|c| c.set(true));
     if self.buffers_diagnostics {
-      FILE_DIAGNOSTICS.with(|buf| buf.borrow_mut().push(diagnostic));
+      FILE_DIAGNOSTICS.with(|buf| buf.borrow_mut().push(annotated));
     } else {
-      self.diagnostic_sender.send(diagnostic).ok();
+      self.diagnostic_sender.send(annotated).ok();
     }
   }
 
+  fn is_fingerprint_skipped(&self, annotated: &AnnotatedDiagnostic) -> bool {
+    let path = annotated.file_abs_path();
+    let dir = path.parent().unwrap_or(self.abs_dir.as_path());
+    let options = self.resolve_options(dir);
+    options.skip_fingerprints.contains(annotated.fingerprint())
+  }
+
   pub fn flush_file_diagnostics(&self) {
-    let diagnostics: Vec<Diagnostic> =
+    let diagnostics: Vec<AnnotatedDiagnostic> =
       FILE_DIAGNOSTICS.with(|buf| buf.borrow_mut().drain(..).collect());
 
     let n = diagnostics.len();
@@ -90,7 +201,10 @@ impl RunContext {
   }
 }
 
-fn supersedes(outer: &Diagnostic, inner: &Diagnostic) -> bool {
+fn supersedes(
+  outer: &AnnotatedDiagnostic,
+  inner: &AnnotatedDiagnostic,
+) -> bool {
   let Some(outer_file_span) =
     outer.source_span().and_then(|s| s.file_span.as_ref())
   else {
@@ -212,7 +326,8 @@ impl ScanContext {
 
   pub fn make_run_context(
     &self,
-    diagnostic_sender: Sender<Diagnostic>,
+    diagnostic_sender: Sender<AnnotatedDiagnostic>,
+    #[cfg(feature = "git-history")] history_map: Option<HistoryMap>,
   ) -> RunContext {
     RunContext {
       abs_dir: self.abs_dir.clone(),
@@ -222,6 +337,8 @@ impl ScanContext {
       diagnostic_sender,
       #[cfg(feature = "cache")]
       cache: self.cache.clone(),
+      #[cfg(feature = "git-history")]
+      history_map,
       scanned_file_count: AtomicUsize::new(0),
       git_root: self.git_root.clone(),
       buffers_diagnostics: true,
@@ -230,7 +347,7 @@ impl ScanContext {
 
   pub fn make_run_context_no_cache(
     &self,
-    diagnostic_sender: Sender<Diagnostic>,
+    diagnostic_sender: Sender<AnnotatedDiagnostic>,
   ) -> RunContext {
     RunContext {
       abs_dir: self.abs_dir.clone(),
@@ -240,6 +357,8 @@ impl ScanContext {
       diagnostic_sender,
       #[cfg(feature = "cache")]
       cache: None,
+      #[cfg(feature = "git-history")]
+      history_map: None,
       scanned_file_count: AtomicUsize::new(0),
       git_root: self.git_root.clone(),
       buffers_diagnostics: true,
@@ -791,77 +910,19 @@ fn process_file_inner(run_context: &RunContext, path: &PathBuf) {
     .scanned_file_count
     .fetch_add(1, Ordering::Relaxed);
 
-  let body_bytes = body.as_bytes();
+  #[cfg(feature = "git-history")]
+  let history_attr = take_matching_history(run_context, body.as_bytes());
 
-  let Some(first_byte) = body_bytes.first() else {
-    return;
-  };
-
-  HAD_FINDINGS.with(|c| c.set(false));
-  FILE_DIAGNOSTICS.with(|buf| buf.borrow_mut().clear());
-
-  match first_byte {
-    #[cfg(feature = "binary-gpg")]
-    0x94 | 0x95 | 0x96 | 0x9C | 0x9D | 0x9E | 0xC5 | 0xC7 => {
-      if let Some(secret) = binary_secret::gpg::scan_bytes(body_bytes) {
-        run_context.send_diagnostic(Diagnostic::BinarySecret {
-          secret: BinarySecret::Gpg(secret),
-          severity: Severity::Critical,
-          file_type: Some(FileType::Gpg),
-          file_abs_path: path.clone(),
-        });
-      }
-    }
-    #[cfg(feature = "binary-der")]
-    0x30 => {
-      if let Some(secret) = binary_secret::der::scan_bytes(body_bytes) {
-        run_context.send_diagnostic(Diagnostic::BinarySecret {
-          secret: BinarySecret::Der(secret),
-          severity: Severity::Critical,
-          file_type: Some(FileType::Der),
-          file_abs_path: path.clone(),
-        });
-      }
-    }
-    #[cfg(feature = "binary-keepass")]
-    0x03 => {
-      if let Some(secret) = binary_secret::keepass::scan_bytes(body_bytes) {
-        run_context.send_diagnostic(Diagnostic::BinarySecret {
-          secret: BinarySecret::KeePass(secret),
-          severity: Severity::Critical,
-          file_type: Some(FileType::KeePass),
-          file_abs_path: path.clone(),
-        });
-      }
-    }
-    #[cfg(feature = "binary-jceks")]
-    0xCE => {
-      if let Some(secret) = binary_secret::jceks::scan_bytes(body_bytes) {
-        run_context.send_diagnostic(Diagnostic::BinarySecret {
-          secret: BinarySecret::Jceks(secret),
-          severity: Severity::Critical,
-          file_type: Some(FileType::Jceks),
-          file_abs_path: path.clone(),
-        });
-      }
-    }
-    #[cfg(feature = "binary-jks")]
-    0xFE => {
-      if let Some(secret) = binary_secret::jks::scan_bytes(body_bytes) {
-        run_context.send_diagnostic(Diagnostic::BinarySecret {
-          secret: BinarySecret::Jks(secret),
-          severity: Severity::Critical,
-          file_type: Some(FileType::Jks),
-          file_abs_path: path.clone(),
-        });
-      }
-    }
-    _ => {
-      process_text(run_context, path, &body);
-    }
+  #[cfg(feature = "git-history")]
+  match history_attr {
+    Some(attr) => with_history_attribution(attr, || {
+      process_bytes(run_context, path, body.as_bytes(), Some(&body));
+    }),
+    None => process_bytes(run_context, path, body.as_bytes(), Some(&body)),
   }
 
-  run_context.flush_file_diagnostics();
+  #[cfg(not(feature = "git-history"))]
+  process_bytes(run_context, path, body.as_bytes(), Some(&body));
 
   #[cfg(feature = "cache")]
   if let (Some(cache), Some(mtime)) = (&run_context.cache, &mtime) {
@@ -874,6 +935,90 @@ fn process_file_inner(run_context: &RunContext, path: &PathBuf) {
 
   #[cfg(not(feature = "cache"))]
   let _ = mtime;
+}
+
+pub fn process_bytes(
+  run_context: &RunContext,
+  path: &PathBuf,
+  bytes: &[u8],
+  text: Option<&str>,
+) {
+  let Some(first_byte) = bytes.first() else {
+    return;
+  };
+
+  HAD_FINDINGS.with(|c| c.set(false));
+  FILE_DIAGNOSTICS.with(|buf| buf.borrow_mut().clear());
+
+  match first_byte {
+    #[cfg(feature = "binary-gpg")]
+    0x94 | 0x95 | 0x96 | 0x9C | 0x9D | 0x9E | 0xC5 | 0xC7 => {
+      if let Some(secret) = binary_secret::gpg::scan_bytes(bytes) {
+        run_context.send_diagnostic(Diagnostic::BinarySecret {
+          secret: BinarySecret::Gpg(secret),
+          severity: Severity::Critical,
+          file_type: Some(FileType::Gpg),
+          file_abs_path: path.clone(),
+          fingerprint: binary_fingerprint(bytes),
+        });
+      }
+    }
+    #[cfg(feature = "binary-der")]
+    0x30 => {
+      if let Some(secret) = binary_secret::der::scan_bytes(bytes) {
+        run_context.send_diagnostic(Diagnostic::BinarySecret {
+          secret: BinarySecret::Der(secret),
+          severity: Severity::Critical,
+          file_type: Some(FileType::Der),
+          file_abs_path: path.clone(),
+          fingerprint: binary_fingerprint(bytes),
+        });
+      }
+    }
+    #[cfg(feature = "binary-keepass")]
+    0x03 => {
+      if let Some(secret) = binary_secret::keepass::scan_bytes(bytes) {
+        run_context.send_diagnostic(Diagnostic::BinarySecret {
+          secret: BinarySecret::KeePass(secret),
+          severity: Severity::Critical,
+          file_type: Some(FileType::KeePass),
+          file_abs_path: path.clone(),
+          fingerprint: binary_fingerprint(bytes),
+        });
+      }
+    }
+    #[cfg(feature = "binary-jceks")]
+    0xCE => {
+      if let Some(secret) = binary_secret::jceks::scan_bytes(bytes) {
+        run_context.send_diagnostic(Diagnostic::BinarySecret {
+          secret: BinarySecret::Jceks(secret),
+          severity: Severity::Critical,
+          file_type: Some(FileType::Jceks),
+          file_abs_path: path.clone(),
+          fingerprint: binary_fingerprint(bytes),
+        });
+      }
+    }
+    #[cfg(feature = "binary-jks")]
+    0xFE => {
+      if let Some(secret) = binary_secret::jks::scan_bytes(bytes) {
+        run_context.send_diagnostic(Diagnostic::BinarySecret {
+          secret: BinarySecret::Jks(secret),
+          severity: Severity::Critical,
+          file_type: Some(FileType::Jks),
+          file_abs_path: path.clone(),
+          fingerprint: binary_fingerprint(bytes),
+        });
+      }
+    }
+    _ => {
+      if let Some(text) = text {
+        process_text(run_context, path, text);
+      }
+    }
+  }
+
+  run_context.flush_file_diagnostics();
 }
 
 #[cfg(feature = "pem")]
@@ -903,6 +1048,7 @@ fn send_pem_diagnostics(
       severity: Severity::Critical,
       file_type: Some(FileType::Pem),
       file_abs_path: path.clone(),
+      fingerprint: text_fingerprint(content.as_bytes()),
     });
     return;
   }
@@ -918,6 +1064,12 @@ fn send_pem_diagnostics(
       value_class: Secret(PrivateKey(finding.key_type)),
       severity: Severity::Critical,
       file_type: None,
+      fingerprint: value_fingerprint(
+        content
+          .get(finding.byte_range.start..finding.byte_range.end)
+          .unwrap_or("")
+          .as_bytes(),
+      ),
     });
   }
 }
@@ -949,6 +1101,7 @@ fn send_putty_diagnostics(
       severity: Severity::Critical,
       file_type: Some(FileType::Putty),
       file_abs_path: path.clone(),
+      fingerprint: text_fingerprint(content.as_bytes()),
     });
     return;
   }
@@ -964,6 +1117,12 @@ fn send_putty_diagnostics(
       value_class: Secret(PuttyKey(finding.key_type)),
       severity: Severity::Critical,
       file_type: None,
+      fingerprint: value_fingerprint(
+        content
+          .get(finding.byte_range.start..finding.byte_range.end)
+          .unwrap_or("")
+          .as_bytes(),
+      ),
     });
   }
 }

@@ -1,6 +1,8 @@
 use serde_json::json;
 
-use crate::diagnostic::{Diagnostic, RULES, Severity};
+use crate::diagnostic::{AnnotatedDiagnostic, Diagnostic, RULES, Severity};
+#[cfg(feature = "git-history")]
+use crate::output::history_to_json;
 use crate::output::{
   SUMMARY_FIELDS, ScanSummary, WriteContext, build_summary, count,
   write_indented_json,
@@ -88,19 +90,22 @@ fn rules() -> Vec<serde_json::Value> {
     .collect()
 }
 
-fn diagnostic_to_result(diagnostic: &Diagnostic) -> serde_json::Value {
-  let message = diagnostic.message();
-  let level = severity_to_level(diagnostic.severity());
+fn diagnostic_to_result(annotated: &AnnotatedDiagnostic) -> serde_json::Value {
+  let message = annotated.message();
+  let level = severity_to_level(annotated.severity());
 
-  let rule_id = diagnostic.id();
+  let rule_id = annotated.id();
 
   let mut result = json!({
     "ruleId": rule_id,
     "level": level,
     "message": { "text": message },
+    "partialFingerprints": {
+      "trestle/v1": annotated.fingerprint().as_str(),
+    },
   });
 
-  result["locations"] = match diagnostic {
+  result["locations"] = match &annotated.diagnostic {
     Diagnostic::SecretAssignment { source_span, .. }
     | Diagnostic::SecretValue { source_span, .. } => build_locations(
       source_span.file_abs_path.as_path(),
@@ -112,13 +117,25 @@ fn diagnostic_to_result(diagnostic: &Diagnostic) -> serde_json::Value {
     }
   };
 
+  let mut properties = serde_json::Map::new();
+
   if let Diagnostic::SecretAssignment {
     assignment_type, ..
-  } = diagnostic
+  } = &annotated.diagnostic
   {
-    result["properties"] = json!({
-      "assignmentType": assignment_type.to_string(),
-    });
+    properties.insert(
+      "assignmentType".to_owned(),
+      json!(assignment_type.to_string()),
+    );
+  }
+
+  #[cfg(feature = "git-history")]
+  if let Some(history) = &annotated.history {
+    properties.insert("history".to_owned(), history_to_json(history));
+  }
+
+  if !properties.is_empty() {
+    result["properties"] = serde_json::Value::Object(properties);
   }
 
   result

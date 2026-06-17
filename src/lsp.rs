@@ -27,8 +27,8 @@ use lsp_types::{
 use crate::config::DEBOUNCE_DURATION;
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::processing::{
-  ScanContext, is_path_skipped, is_path_statically_skipped, process_dir,
-  process_text,
+  ScanContext, is_path_skipped, is_path_statically_skipped,
+  process_dir_with_surrounding_context, process_text,
 };
 use crate::source::compute_line_starts;
 use crate::trestlerc;
@@ -590,6 +590,7 @@ impl Session {
     else {
       return;
     };
+
     self.publish_trestlerc(out, &root_dir);
     self.scan_root(out, &root_dir);
     self.rescan_open_buffers_under(out, &root_dir);
@@ -734,17 +735,17 @@ fn handle_notification<O: Output>(
         "didChangeWorkspaceFolders",
       ) {
         for added in p.event.added {
-          if let Ok(dir) = added.uri.to_file_path() {
-            if session.add_root(out, dir.clone()) {
-              match start_fs_watcher(&dir, fs_tx.clone()) {
-                Ok(w) => {
-                  watchers.insert(dir, w);
-                }
-                Err(err) => log_recoverable(
-                  "could not start watcher for added workspace root",
-                  &err,
-                ),
+          if let Ok(dir) = added.uri.to_file_path()
+            && session.add_root(out, dir.clone())
+          {
+            match start_fs_watcher(&dir, fs_tx.clone()) {
+              Ok(w) => {
+                watchers.insert(dir, w);
               }
+              Err(err) => log_recoverable(
+                "could not start watcher for added workspace root",
+                &err,
+              ),
             }
           }
         }
@@ -918,8 +919,10 @@ impl Workspace {
         diag_tx,
         #[cfg(feature = "git-history")]
         None,
+        #[cfg(feature = "validation")]
+        None,
       );
-      process_dir(&run_context, &root.abs_dir);
+      process_dir_with_surrounding_context(&run_context, &root.abs_dir);
       drop(run_context);
       scan.flush_cache();
     }
@@ -981,7 +984,11 @@ impl Workspace {
 
     let (diag_tx, _diag_rx) = mpsc::channel();
 
-    let run_context = scan.make_run_context_no_cache(diag_tx);
+    let run_context = scan.make_run_context_no_cache(
+      diag_tx,
+      #[cfg(feature = "validation")]
+      None,
+    );
 
     is_path_statically_skipped(&run_context, path)
   }
@@ -1021,7 +1028,11 @@ fn scan_in_root(
   let (diag_tx, diag_rx) = mpsc::channel();
   let scan = root.scan.borrow();
 
-  let run_context = scan.make_run_context_no_cache(diag_tx);
+  let run_context = scan.make_run_context_no_cache(
+    diag_tx,
+    #[cfg(feature = "validation")]
+    None,
+  );
 
   if is_path_skipped(&run_context, path) {
     drop(run_context);
@@ -1340,9 +1351,8 @@ fn whole_file_edit(existing: &str, new_text: String) -> TextEdit {
 // -----------------------------------------------------------------------------
 
 pub fn diagnostic_range(diagnostic: &Diagnostic) -> Range {
-  match diagnostic {
-    Diagnostic::SecretAssignment { source_span, .. }
-    | Diagnostic::SecretValue { source_span, .. } => {
+  match diagnostic.source_span() {
+    Some(source_span) => {
       if let Some(span) = &source_span.file_span {
         let start_line = (span.start.line.saturating_sub(1)) as u32;
         let start_col = (span.start.column.saturating_sub(1)) as u32;
@@ -1356,9 +1366,7 @@ pub fn diagnostic_range(diagnostic: &Diagnostic) -> Range {
         Range::new(LspPosition::new(0, 0), LspPosition::new(0, 1))
       }
     }
-    Diagnostic::BinarySecret { .. } | Diagnostic::TextSecret { .. } => {
-      Range::new(LspPosition::new(0, 0), LspPosition::new(0, 1))
-    }
+    None => Range::new(LspPosition::new(0, 0), LspPosition::new(0, 1)),
   }
 }
 

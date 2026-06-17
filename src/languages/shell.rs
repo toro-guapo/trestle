@@ -327,12 +327,8 @@ fn parameter_expansion_default(s: &str) -> Option<String> {
     rest
   } else if let Some(rest) = rest.strip_prefix('=') {
     rest
-  } else if let Some(rest) = rest.strip_prefix('+') {
-    rest
   } else {
-    // Unrecognized operator (including `:?`/`?`, which produce an
-    // error not a value), or no operator at all.
-    return None;
+    rest.strip_prefix('+')?
   };
 
   let default = default.trim();

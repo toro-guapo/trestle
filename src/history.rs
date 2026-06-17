@@ -111,16 +111,16 @@ impl HistoryWalker {
       }
     }
 
-    if let Ok(stash) = self.repo.try_find_reference("refs/stash") {
-      if let Some(reference) = stash {
-        self.walk_ref(
-          reference,
-          HistoryLocation::Stash,
-          &mut blobs,
-          &mut reachable_commits,
-          filter,
-        );
-      }
+    if let Ok(stash) = self.repo.try_find_reference("refs/stash")
+      && let Some(reference) = stash
+    {
+      self.walk_ref(
+        reference,
+        HistoryLocation::Stash,
+        &mut blobs,
+        &mut reachable_commits,
+        filter,
+      );
     }
 
     self.walk_dangling(&reachable_commits, &mut blobs, filter);
@@ -467,9 +467,7 @@ impl BlobInfo {
     let author_date =
       DateTime::from_timestamp(self.introducing_secs, 0)?.date_naive();
 
-    self
-      .commits
-      .sort_by(|a, b| a.author_time.cmp(&b.author_time));
+    self.commits.sort_by_key(|a| a.author_time);
 
     Some(BlobOccurrence {
       oid,

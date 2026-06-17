@@ -281,17 +281,16 @@ pub fn classify_url(
   let kind = UrlKind::from_scheme(parsed.scheme());
 
   // 1. Password embedded in userinfo (scheme://user:password@host).
-  if let Some(password) = parsed.password() {
-    if !password.is_empty() {
-      if let Ok(password) = percent_decode_str(password).decode_utf8() {
-        let normalized_value = normalize_value(&password);
-        if !is_placeholder(&normalized_value) {
-          return Some(ValueClass::Secret(NamedSecret::Url(UrlSecret {
-            kind,
-            location: UrlSecretLocation::Userinfo,
-          })));
-        }
-      }
+  if let Some(password) = parsed.password()
+    && !password.is_empty()
+    && let Ok(password) = percent_decode_str(password).decode_utf8()
+  {
+    let normalized_value = normalize_value(&password);
+    if !is_placeholder(&normalized_value) {
+      return Some(ValueClass::Secret(NamedSecret::Url(UrlSecret {
+        kind,
+        location: UrlSecretLocation::Userinfo,
+      })));
     }
   }
 

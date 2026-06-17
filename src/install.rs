@@ -186,10 +186,10 @@ pub fn install_in(
     }
   }
 
-  if let Some(hook_path) = targets.hook_path {
-    if install_hook(&hook_path, trestle_path)? {
-      changes.push(InstallChange::InstalledPreCommitHook);
-    }
+  if let Some(hook_path) = targets.hook_path
+    && install_hook(&hook_path, trestle_path)?
+  {
+    changes.push(InstallChange::InstalledPreCommitHook);
   }
 
   if install_agent_instructions(&targets.project_root)? {
@@ -225,35 +225,32 @@ pub fn uninstall_in(start: &Path) -> Result<Vec<UninstallChange>, String> {
     }
 
     let gitignore_path = targets.project_root.join(GITIGNORE_FILENAME);
-    if let Ok(existing) = fs::read_to_string(&gitignore_path) {
-      if let Some(updated) = remove_line(&existing, GITIGNORE_LINE) {
-        if updated.trim().is_empty() {
-          fs::remove_file(&gitignore_path).map_err(|e| {
-            format!("Failed to remove {GITIGNORE_FILENAME}: {e}")
-          })?;
-        } else {
-          fs::write(&gitignore_path, updated).map_err(|e| {
-            format!("Failed to update {GITIGNORE_FILENAME}: {e}")
-          })?;
-        }
-        changes.push(UninstallChange::UpdatedGitignore);
+    if let Ok(existing) = fs::read_to_string(&gitignore_path)
+      && let Some(updated) = remove_line(&existing, GITIGNORE_LINE)
+    {
+      if updated.trim().is_empty() {
+        fs::remove_file(&gitignore_path)
+          .map_err(|e| format!("Failed to remove {GITIGNORE_FILENAME}: {e}"))?;
+      } else {
+        fs::write(&gitignore_path, updated)
+          .map_err(|e| format!("Failed to update {GITIGNORE_FILENAME}: {e}"))?;
       }
+      changes.push(UninstallChange::UpdatedGitignore);
     }
   }
 
-  if let Some(hook_path) = targets.hook_path {
-    if let Ok(existing) = fs::read_to_string(&hook_path) {
-      if let Some(updated) = remove_trestle_lines(&existing) {
-        if hook_is_essentially_empty(&updated) {
-          fs::remove_file(&hook_path)
-            .map_err(|e| format!("Failed to remove pre-commit hook: {e}"))?;
-        } else {
-          fs::write(&hook_path, updated)
-            .map_err(|e| format!("Failed to update pre-commit hook: {e}"))?;
-        }
-        changes.push(UninstallChange::RemovedPreCommitHook);
-      }
+  if let Some(hook_path) = targets.hook_path
+    && let Ok(existing) = fs::read_to_string(&hook_path)
+    && let Some(updated) = remove_trestle_lines(&existing)
+  {
+    if hook_is_essentially_empty(&updated) {
+      fs::remove_file(&hook_path)
+        .map_err(|e| format!("Failed to remove pre-commit hook: {e}"))?;
+    } else {
+      fs::write(&hook_path, updated)
+        .map_err(|e| format!("Failed to update pre-commit hook: {e}"))?;
     }
+    changes.push(UninstallChange::RemovedPreCommitHook);
   }
 
   if uninstall_agent_instructions(&targets.project_root)? {

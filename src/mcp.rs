@@ -13,8 +13,8 @@ use rmcp::{
 use crate::diagnostic::Diagnostic;
 use crate::install;
 use crate::processing::{
-  ScanContext, process_dir, process_files_with_surrounding_context,
-  process_text,
+  ScanContext, process_dir_with_surrounding_context,
+  process_files_with_surrounding_context, process_text,
 };
 use crate::trestlerc::OptionsResolver;
 
@@ -296,8 +296,10 @@ fn initial_scan(runner: &ToolRunner) {
     diag_tx,
     #[cfg(feature = "git-history")]
     None,
+    #[cfg(feature = "validation")]
+    None,
   );
-  process_dir(&run, &runner.workspace);
+  process_dir_with_surrounding_context(&run, &runner.workspace);
   drop(run);
   for _ in diag_rx {}
   scan.flush_cache();
@@ -321,12 +323,16 @@ fn run_scan_path_tool(runner: &ToolRunner, path: Option<&str>) -> String {
 
   let scan = build_scan_context(runner);
   let (diag_tx, diag_rx) = mpsc::channel();
-  let run = scan.make_run_context_no_cache(diag_tx);
+  let run = scan.make_run_context_no_cache(
+    diag_tx,
+    #[cfg(feature = "validation")]
+    None,
+  );
 
   if target.is_dir() {
-    process_dir(&run, &target);
+    process_dir_with_surrounding_context(&run, &target);
   } else {
-    process_files_with_surrounding_context(&run, &[target.clone()]);
+    process_files_with_surrounding_context(&run, std::slice::from_ref(&target));
   }
   drop(run);
 
@@ -363,7 +369,11 @@ fn run_scan_proposed_tool(
 
   let scan = build_scan_context(runner);
   let (diag_tx, diag_rx) = mpsc::channel();
-  let run = scan.make_run_context_no_cache(diag_tx);
+  let run = scan.make_run_context_no_cache(
+    diag_tx,
+    #[cfg(feature = "validation")]
+    None,
+  );
 
   process_text(&run, &virtual_path, content);
   run.flush_file_diagnostics();

@@ -8,6 +8,7 @@ pub struct Service {
   pub display_name: &'static str,
   pub env_var: &'static str,
   pub patterns: &'static [&'static str],
+  pub public_patterns: &'static [&'static str],
 }
 
 impl Service {
@@ -17,20 +18,32 @@ impl Service {
 }
 
 thread_local! {
-  static REGEX_CACHE: RefCell<HashMap<&'static str, Option<RegexSet>>> = RefCell::new(
+  static REGEX_CACHE: RefCell<HashMap<usize, Option<RegexSet>>> = RefCell::new(
     HashMap::new()
   );
 }
 
+fn patterns_match(patterns: &'static [&'static str], value: &str) -> bool {
+  if patterns.is_empty() {
+    return false;
+  }
+
+  REGEX_CACHE.with(|cache| {
+    let mut cache = cache.borrow_mut();
+    let entry = cache
+      .entry(patterns.as_ptr() as usize)
+      .or_insert_with(|| RegexSet::new(patterns).ok());
+    entry.as_ref().is_some_and(|r| r.is_match(value))
+  })
+}
+
 impl Service {
   pub fn matches(&self, value: &str) -> bool {
-    REGEX_CACHE.with(|cache| {
-      let mut cache = cache.borrow_mut();
-      let entry = cache
-        .entry(self.keyword)
-        .or_insert_with(|| RegexSet::new(self.patterns).ok());
-      entry.as_ref().is_some_and(|r| r.is_match(value))
-    })
+    patterns_match(self.patterns, value)
+  }
+
+  pub fn matches_public(&self, value: &str) -> bool {
+    patterns_match(self.public_patterns, value)
   }
 }
 
@@ -43,6 +56,7 @@ macro_rules! define_services {
         $service_display:literal,
         $service_env_var:literal,
         [ $( $service_pattern:literal ),* $(,)? ]
+        $(, public: [ $( $public_pattern:literal ),* $(,)? ] )?
       )
     ),* $(,)? ],
   ) => {
@@ -58,6 +72,7 @@ macro_rules! define_services {
           display_name: $service_display,
           env_var: $service_env_var,
           patterns: &[ $( $service_pattern ),* ],
+          public_patterns: &[ $( $( $public_pattern ),* )? ],
         }
       ),*
     ];
@@ -108,6 +123,10 @@ define_services!(
     ("backstage", "Backstage", "BACKSTAGE_TOKEN", [r"^[a-zA-Z0-9_\-]{32,}$"]),
     #[cfg(feature = "service-beamer")]
     ("beamer", "Beamer", "BEAMER_API_KEY", [r"^b_[a-zA-Z0-9=_+/\-]{44}$"]),
+    #[cfg(feature = "service-braintree")]
+    ("braintree", "Braintree", "BRAINTREE_TOKENIZATION_KEY", [
+      r"^(?:production|sandbox)_[0-9a-z]{8}_[0-9a-z]{16,}$",
+    ]),
     #[cfg(feature = "service-bugsnag")]
     ("bugsnag", "Bugsnag", "BUGSNAG_API_KEY", [
       r"^[0-9a-z]{8}-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{12}$",
@@ -263,6 +282,11 @@ define_services!(
       r"^[a-z0-9]{14}$",
       r"^[a-z0-9]{16}$",
     ]),
+    #[cfg(feature = "service-lob")]
+    ("lob", "Lob", "LOB_API_KEY",
+      [r"^(?:live|test)_[a-f0-9]{35}$"],
+      public: [r"^(?:test|live)_pub_[a-f0-9]{31}$"]
+    ),
     #[cfg(feature = "service-looker")]
     ("looker", "Looker", "LOOKER_API_SECRET", [
       r"^[a-z0-9]{20}$",
@@ -410,6 +434,8 @@ define_services!(
     ]),
     #[cfg(feature = "service-travis")]
     ("travis", "Travis CI", "TRAVIS_API_TOKEN", [r"^[a-zA-Z0-9_]{22}$"]),
+    #[cfg(feature = "service-trello")]
+    ("trello", "Trello", "TRELLO_API_KEY", [r"^[a-zA-Z0-9]{32}$"]),
     #[cfg(feature = "service-twitch")]
     ("twitch", "Twitch", "TWITCH_CLIENT_SECRET", [r"^[a-z0-9]{30}$"]),
     #[cfg(feature = "service-typeform")]

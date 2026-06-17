@@ -192,9 +192,7 @@ fn format_commit_line(
       let subject_space =
         width.saturating_sub(indent_cols + prefix.chars().count() + 1);
 
-      let subject = if c.subject.is_empty() {
-        String::new()
-      } else if subject_space == 0 {
+      let subject = if c.subject.is_empty() || subject_space == 0 {
         String::new()
       } else {
         truncate_with_ellipsis(&c.subject, subject_space)

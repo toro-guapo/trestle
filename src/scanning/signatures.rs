@@ -1,6 +1,7 @@
 use std::cell::RefCell;
+use std::ops::Range;
 
-use regex::Regex;
+use regex::{Regex, RegexSet};
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct Signature {
@@ -16,34 +17,105 @@ impl Signature {
       "Sentry DSN" => true,
       #[cfg(feature = "signature-stripe-publishable")]
       "Stripe publishable key" => true,
+      #[cfg(feature = "signature-supabase-publishable")]
+      "Supabase publishable key" => true,
+      _ => false,
+    }
+  }
+
+  pub fn is_placeholder(&self) -> bool {
+    match self.name {
+      #[cfg(feature = "signature-facebook")]
+      "Facebook example token" => true,
       _ => false,
     }
   }
 }
 
+struct SignatureCache {
+  set: Option<RegexSet>,
+  regexes: Vec<Option<Regex>>,
+}
+
 thread_local! {
-  static REGEX_CACHE: RefCell<Vec<Option<Regex>>> = RefCell::new(
-    Vec::new()
-  );
+  static REGEX_CACHE: RefCell<Option<SignatureCache>> =
+    const { RefCell::new(None) };
+}
+
+fn with_cache<T>(f: impl FnOnce(&SignatureCache) -> T) -> T {
+  REGEX_CACHE.with(|cell| {
+    let mut cache = cell.borrow_mut();
+    let cache = cache.get_or_insert_with(|| SignatureCache {
+      set: RegexSet::new(SIGNATURES.iter().map(|sig| sig.pattern)).ok(),
+      regexes: SIGNATURES
+        .iter()
+        .map(|sig| Regex::new(sig.pattern).ok())
+        .collect(),
+    });
+
+    f(cache)
+  })
 }
 
 pub fn scan(value: &str) -> Option<&'static Signature> {
-  REGEX_CACHE.with(|cache| {
-    let mut cache = cache.borrow_mut();
+  with_cache(|cache| match &cache.set {
+    Some(set) => set
+      .matches(value)
+      .iter()
+      .next()
+      .and_then(|i| SIGNATURES.get(i)),
+    None => scan_individually(value, cache),
+  })
+}
 
-    if cache.is_empty() {
-      cache.extend(SIGNATURES.iter().map(|sig| Regex::new(sig.pattern).ok()));
+fn scan_individually(
+  value: &str,
+  cache: &SignatureCache,
+) -> Option<&'static Signature> {
+  for (i, sig) in SIGNATURES.iter().enumerate() {
+    if cache
+      .regexes
+      .get(i)
+      .and_then(|re| re.as_ref())
+      .is_some_and(|re| re.is_match(value))
+    {
+      return Some(sig);
     }
+  }
 
-    for (i, sig) in SIGNATURES.iter().enumerate() {
-      if let Some(re) = cache.get(i).and_then(|r| r.as_ref()) {
-        if re.is_match(value) {
-          return Some(sig);
+  None
+}
+
+pub fn scan_all(content: &str) -> Vec<(Range<usize>, &'static Signature)> {
+  with_cache(|cache| {
+    let candidates: Vec<usize> = match &cache.set {
+      Some(set) => set.matches(content).iter().collect(),
+      None => (0..SIGNATURES.len()).collect(),
+    };
+
+    let mut matches: Vec<(Range<usize>, &'static Signature)> = Vec::new();
+    for index in candidates {
+      if let (Some(sig), Some(Some(re))) =
+        (SIGNATURES.get(index), cache.regexes.get(index))
+      {
+        for found in re.find_iter(content) {
+          matches.push((found.start()..found.end(), sig));
         }
       }
     }
 
-    None
+    matches.sort_by_key(|(range, _)| (range.start, range.end));
+
+    let mut result: Vec<(Range<usize>, &'static Signature)> = Vec::new();
+    let mut last_end = 0;
+    for (range, sig) in matches {
+      if range.start >= last_end {
+        last_end = range.end;
+        result.push((range, sig));
+      }
+    }
+
+    result
   })
 }
 
@@ -53,6 +125,12 @@ const SIGNATURES: &[Signature] = &[
     name: "Adafruit IO key",
     env_var: "ADAFRUIT_IO_KEY",
     pattern: r"(?-u:\b)aio_[a-zA-Z0-9]{28}(?-u:\b)",
+  },
+  #[cfg(feature = "signature-adyen")]
+  Signature {
+    name: "Adyen API key",
+    env_var: "ADYEN_API_KEY",
+    pattern: r"(?-u:\b)AQE[A-Za-z0-9]{170,}(?-u:\b)",
   },
   #[cfg(feature = "signature-age")]
   Signature {
@@ -66,6 +144,18 @@ const SIGNATURES: &[Signature] = &[
     env_var: "ALCHEMY_API_KEY",
     pattern: r"(?-u:\b)alcht_[a-zA-Z0-9]{30}(?-u:\b)",
   },
+  #[cfg(feature = "signature-alibaba")]
+  Signature {
+    name: "Alibaba Cloud access key ID",
+    env_var: "ALIBABA_CLOUD_ACCESS_KEY_ID",
+    pattern: r"(?-u:\b)LTAI[A-Za-z0-9]{12,20}(?-u:\b)",
+  },
+  #[cfg(feature = "signature-amazon-mws")]
+  Signature {
+    name: "Amazon MWS auth token",
+    env_var: "AMAZON_MWS_AUTH_TOKEN",
+    pattern: r"(?-u:\b)amzn\.mws\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?-u:\b)",
+  },
   #[cfg(feature = "signature-apify")]
   Signature {
     name: "Apify API token",
@@ -77,6 +167,13 @@ const SIGNATURES: &[Signature] = &[
     name: "Anthropic API key",
     env_var: "ANTHROPIC_API_KEY",
     pattern: r"(?-u:\b)sk-ant-(?:api03|admin01)-[A-Za-z0-9_\-]{93}AA(?-u:\b)",
+  },
+  #[cfg(feature = "signature-apr1")]
+  Signature {
+    name: "Apache apr1 password hash",
+    env_var: "APR1_PASSWORD_HASH",
+    // Apache MD5 crypt (htpasswd): $apr1$<salt up to 8>$<22-char hash>.
+    pattern: r"\$apr1\$[A-Za-z0-9./]{1,8}\$[A-Za-z0-9./]{22}",
   },
   #[cfg(feature = "signature-argon2")]
   Signature {
@@ -97,17 +194,31 @@ const SIGNATURES: &[Signature] = &[
     env_var: "ATLASSIAN_API_TOKEN",
     pattern: r"(?-u:\b)ATATT3[A-Za-z0-9_\-=]{100,}(?-u:\b)",
   },
+  #[cfg(feature = "signature-authress")]
+  Signature {
+    name: "Authress service client access key",
+    env_var: "AUTHRESS_ACCESS_KEY",
+    pattern: r"(?-u:\b)(?:sc|ext|scauth|authress)_[A-Za-z0-9]{5,30}\.[A-Za-z0-9]{4,6}\.acc[_\-][A-Za-z0-9\-]{10,32}\.[A-Za-z0-9+/_=\-]{30,120}",
+  },
   #[cfg(feature = "signature-aws")]
   Signature {
     name: "AWS access key",
     env_var: "AWS_ACCESS_KEY_ID",
-    pattern: r"(?-u:\b)AKIA[A-Z0-9]{16}(?-u:\b)",
+    // AKIA long-term, ABIA STS service bearer, ACCA context-specific, and the
+    // legacy A3T<x> form. ASIA temporary keys are handled separately below.
+    pattern: r"(?-u:\b)(?:AKIA|ABIA|ACCA|A3T[A-Z0-9])[A-Z0-9]{16}(?-u:\b)",
   },
   #[cfg(feature = "signature-aws-temp")]
   Signature {
     name: "AWS temporary access key",
     env_var: "AWS_ACCESS_KEY_ID",
     pattern: r"(?-u:\b)ASIA[A-Z0-9]{16}(?-u:\b)",
+  },
+  #[cfg(feature = "signature-aws-bedrock")]
+  Signature {
+    name: "AWS Bedrock API key",
+    env_var: "AWS_BEARER_TOKEN_BEDROCK",
+    pattern: r"(?-u:\b)ABSK[A-Za-z0-9+/]{109,}={0,2}",
   },
   #[cfg(feature = "signature-bcrypt")]
   Signature {
@@ -150,7 +261,13 @@ const SIGNATURES: &[Signature] = &[
   Signature {
     name: "Buildkite agent token",
     env_var: "BUILDKITE_AGENT_TOKEN",
-    pattern: r"(?-u:\b)bkua_[a-z0-9]{40}(?-u:\b)",
+    pattern: r"(?-u:\b)(?:bkua_[a-z0-9]{40}|bkaa_[A-Za-z0-9]{40,})(?-u:\b)",
+  },
+  #[cfg(feature = "signature-braintree")]
+  Signature {
+    name: "Braintree access token",
+    env_var: "BRAINTREE_ACCESS_TOKEN",
+    pattern: r"(?-u:\b)access_token\$(?:production|sandbox)\$[0-9a-z]{16}\$[0-9a-f]{32}(?-u:\b)",
   },
   #[cfg(feature = "signature-brevo")]
   Signature {
@@ -158,11 +275,23 @@ const SIGNATURES: &[Signature] = &[
     env_var: "BREVO_API_KEY",
     pattern: r"(?-u:\b)xkeysib-[A-Za-z0-9_\-]{50,}(?-u:\b)",
   },
+  #[cfg(feature = "signature-checkout")]
+  Signature {
+    name: "Checkout.com secret key",
+    env_var: "CHECKOUT_SECRET_KEY",
+    pattern: r"(?-u:\b)sk_(?:test_)?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?-u:\b)",
+  },
   #[cfg(feature = "signature-circleci")]
   Signature {
     name: "CircleCI personal access token",
     env_var: "CIRCLECI_PERSONAL_ACCESS_TOKEN",
     pattern: r"(?-u:\b)CCIPAT_[a-zA-Z0-9]{22}_[a-fA-F0-9]{40}(?-u:\b)",
+  },
+  #[cfg(feature = "signature-clickhouse")]
+  Signature {
+    name: "ClickHouse Cloud API key",
+    env_var: "CLICKHOUSE_CLOUD_API_SECRET",
+    pattern: r"(?-u:\b)4b1d[A-Za-z0-9]{38}(?-u:\b)",
   },
   #[cfg(feature = "signature-clojars")]
   Signature {
@@ -175,6 +304,12 @@ const SIGNATURES: &[Signature] = &[
     name: "Contentful personal access token",
     env_var: "CONTENTFUL_PERSONAL_ACCESS_TOKEN",
     pattern: r"(?-u:\b)CFPAT-[A-Za-z0-9_\-]{40,}(?-u:\b)",
+  },
+  #[cfg(feature = "signature-crates")]
+  Signature {
+    name: "crates.io API token",
+    env_var: "CARGO_REGISTRY_TOKEN",
+    pattern: r"(?-u:\b)cio[A-Za-z0-9]{32}(?-u:\b)",
   },
   #[cfg(feature = "signature-databricks")]
   Signature {
@@ -213,7 +348,21 @@ const SIGNATURES: &[Signature] = &[
   Signature {
     name: "Doppler token",
     env_var: "DOPPLER_TOKEN",
-    pattern: r"dp\.(?:pt|ct|sa|st)\.[A-Za-z0-9]{20,}",
+    pattern: r"dp\.(?:pt|ct|sa|st|pa)\.[A-Za-z0-9]{20,}",
+  },
+  #[cfg(feature = "signature-dropbox")]
+  Signature {
+    name: "Dropbox access token",
+    env_var: "DROPBOX_ACCESS_TOKEN",
+    // Short-lived `sl.` tokens, and long-lived tokens whose distinctive
+    // marker is the literal `AAAAAAAAAA` run after an 11-char prefix.
+    pattern: r"(?-u:\b)(?:sl\.[A-Za-z0-9\-=_]{135}|[a-z0-9]{11}AAAAAAAAAA[A-Za-z0-9\-_=]{43})",
+  },
+  #[cfg(feature = "signature-duffel")]
+  Signature {
+    name: "Duffel access token",
+    env_var: "DUFFEL_ACCESS_TOKEN",
+    pattern: r"(?-u:\b)duffel_(?:test|live)_[A-Za-z0-9_\-=]{43}",
   },
   #[cfg(feature = "signature-dynatrace")]
   Signature {
@@ -221,11 +370,41 @@ const SIGNATURES: &[Signature] = &[
     env_var: "DYNATRACE_API_TOKEN",
     pattern: r"(?-u:\b)dt0c01\.[A-Za-z0-9]{24}\.[A-Za-z0-9]{64}(?-u:\b)",
   },
+  #[cfg(feature = "signature-easypost")]
+  Signature {
+    name: "EasyPost API key",
+    env_var: "EASYPOST_API_KEY",
+    pattern: r"(?-u:\b)EZ(?:AK|TK)[A-Za-z0-9]{54}(?-u:\b)",
+  },
+  #[cfg(feature = "signature-facebook")]
+  Signature {
+    name: "Facebook access token",
+    env_var: "FACEBOOK_ACCESS_TOKEN",
+    pattern: r"(?-u:\b)EAA[MC][A-Za-z0-9]{100,}(?-u:\b)",
+  },
+  #[cfg(feature = "signature-facebook")]
+  Signature {
+    name: "Facebook example token",
+    env_var: "FACEBOOK_ACCESS_TOKEN",
+    pattern: r"(?-u:\b)EAACEdEose0cBA[A-Za-z0-9]{8,}(?-u:\b)",
+  },
   #[cfg(feature = "signature-figma")]
   Signature {
     name: "Figma personal access token",
     env_var: "FIGMA_PERSONAL_ACCESS_TOKEN",
     pattern: r"(?-u:\b)figd_[A-Za-z0-9_\-]{20,}(?-u:\b)",
+  },
+  #[cfg(feature = "signature-fleetbase")]
+  Signature {
+    name: "FleetBase API key",
+    env_var: "FLEETBASE_API_KEY",
+    pattern: r"(?-u:\b)flb_live_[0-9a-zA-Z]{20}(?-u:\b)",
+  },
+  #[cfg(feature = "signature-flexport")]
+  Signature {
+    name: "Flexport API token",
+    env_var: "FLEXPORT_API_TOKEN",
+    pattern: r"(?-u:\b)shltm_[0-9A-Za-z_\-]{40}(?-u:\b)",
   },
   #[cfg(feature = "signature-flutterwave")]
   Signature {
@@ -239,6 +418,18 @@ const SIGNATURES: &[Signature] = &[
     env_var: "FLY_API_TOKEN",
     pattern: r"(?-u:\b)fo1_[A-Za-z0-9_\-]{20,}(?-u:\b)",
   },
+  #[cfg(feature = "signature-foursquare")]
+  Signature {
+    name: "Foursquare API key",
+    env_var: "FOURSQUARE_API_KEY",
+    pattern: r"(?-u:\b)fsq3[A-Za-z0-9+/_\-]{40,}={0,2}",
+  },
+  #[cfg(feature = "signature-frameio")]
+  Signature {
+    name: "Frame.io token",
+    env_var: "FRAMEIO_TOKEN",
+    pattern: r"(?-u:\b)fio-u-[A-Za-z0-9\-_=]{64}",
+  },
   #[cfg(feature = "signature-github")]
   Signature {
     name: "GitHub token",
@@ -249,7 +440,7 @@ const SIGNATURES: &[Signature] = &[
   Signature {
     name: "GitLab token",
     env_var: "GITLAB_TOKEN",
-    pattern: r"(?-u:\b)gl(?:pat|ptt|rt|soat|dt|cbt|imt|agent|ffct|ft|oas)-[A-Za-z0-9_\-]{20,}(?-u:\b)",
+    pattern: r"(?-u:\b)(?:gl(?:pat|ptt|rt|soat|dt|cbt|imt|agent|ffct|ft|oas)-[A-Za-z0-9_\-]{20,}|GR1348941[A-Za-z0-9_\-]{20,})(?-u:\b)",
   },
   #[cfg(feature = "signature-google")]
   Signature {
@@ -265,6 +456,12 @@ const SIGNATURES: &[Signature] = &[
     // Optional secondary "." separated segments appear in some variants.
     pattern: r"(?-u:\b)ya29\.[A-Za-z0-9_\-]{20,}(?:\.[A-Za-z0-9_\-]+)*(?-u:\b)",
   },
+  #[cfg(feature = "signature-gcs-hmac")]
+  Signature {
+    name: "Google Cloud Storage HMAC key ID",
+    env_var: "GCS_HMAC_ACCESS_ID",
+    pattern: r"(?-u:\b)GOOG1[A-Z0-9]{50,70}(?-u:\b)",
+  },
   #[cfg(feature = "signature-grafana")]
   Signature {
     name: "Grafana token",
@@ -277,11 +474,23 @@ const SIGNATURES: &[Signature] = &[
     env_var: "GROQ_API_KEY",
     pattern: r"(?-u:\b)gsk_[A-Za-z0-9]{48,}(?-u:\b)",
   },
+  #[cfg(feature = "signature-harness")]
+  Signature {
+    name: "Harness API key",
+    env_var: "HARNESS_API_KEY",
+    pattern: r"(?-u:\b)(?:pat|sat)\.[A-Za-z0-9_\-]{22}\.[A-Za-z0-9]{24}\.[A-Za-z0-9]{20}(?-u:\b)",
+  },
   #[cfg(feature = "signature-hashicorp-vault")]
   Signature {
     name: "HashiCorp Vault token",
     env_var: "VAULT_TOKEN",
     pattern: r"(?-u:\b)hv[sbr]\.[A-Za-z0-9_\-]{20,}(?-u:\b)",
+  },
+  #[cfg(feature = "signature-terraform-cloud")]
+  Signature {
+    name: "HashiCorp Terraform Cloud token",
+    env_var: "TERRAFORM_CLOUD_TOKEN",
+    pattern: r"(?-u:\b)[A-Za-z0-9]{14}\.atlasv1\.[A-Za-z0-9\-_=]{60,70}",
   },
   #[cfg(feature = "signature-heroku")]
   Signature {
@@ -307,6 +516,12 @@ const SIGNATURES: &[Signature] = &[
     env_var: "INFRACOST_API_KEY",
     pattern: r"(?-u:\b)ico-[A-Za-z0-9]{20,}(?-u:\b)",
   },
+  #[cfg(feature = "signature-instagram")]
+  Signature {
+    name: "Instagram access token",
+    env_var: "INSTAGRAM_ACCESS_TOKEN",
+    pattern: r"(?-u:\b)IGQ[A-Za-z0-9_\-]{100,}(?-u:\b)",
+  },
   #[cfg(feature = "signature-jwt")]
   Signature {
     name: "JSON Web Token",
@@ -323,7 +538,7 @@ const SIGNATURES: &[Signature] = &[
   Signature {
     name: "LangSmith API token",
     env_var: "LANGSMITH_API_KEY",
-    pattern: r"(?-u:\b)lsv2_pt_[a-f0-9]{32,}(?-u:\b)",
+    pattern: r"(?-u:\b)lsv2_(?:pt|sk)_[a-f0-9]{32,}(?-u:\b)",
   },
   #[cfg(feature = "signature-launchdarkly")]
   Signature {
@@ -338,6 +553,31 @@ const SIGNATURES: &[Signature] = &[
     name: "Linear API key",
     env_var: "LINEAR_API_KEY",
     pattern: r"(?-u:\b)lin_api_[A-Za-z0-9]{30,}(?-u:\b)",
+  },
+  #[cfg(feature = "signature-maxmind")]
+  Signature {
+    name: "MaxMind license key",
+    env_var: "MAXMIND_LICENSE_KEY",
+    pattern: r"(?-u:\b)[A-Za-z0-9]{6}_[A-Za-z0-9]{29}_mmk(?-u:\b)",
+  },
+  #[cfg(feature = "signature-md5crypt")]
+  Signature {
+    name: "MD5 crypt password hash",
+    env_var: "MD5CRYPT_PASSWORD_HASH",
+    // crypt(3) MD5: $1$<salt up to 8>$<22-char hash>.
+    pattern: r"\$1\$[A-Za-z0-9./]{1,8}\$[A-Za-z0-9./]{22}",
+  },
+  #[cfg(feature = "signature-teams-webhook")]
+  Signature {
+    name: "Microsoft Teams webhook URL",
+    env_var: "TEAMS_WEBHOOK_URL",
+    pattern: r"https://[a-z0-9]+\.webhook\.office\.com/webhookb2/[a-z0-9]{8}-(?:[a-z0-9]{4}-){3}[a-z0-9]{12}@[a-z0-9]{8}-(?:[a-z0-9]{4}-){3}[a-z0-9]{12}/IncomingWebhook/[a-z0-9]{32}/[a-z0-9]{8}-(?:[a-z0-9]{4}-){3}[a-z0-9]{12}",
+  },
+  #[cfg(feature = "signature-neon")]
+  Signature {
+    name: "Neon API key",
+    env_var: "NEON_API_KEY",
+    pattern: r"(?-u:\b)napi_[A-Za-z0-9_\-]{40,}(?-u:\b)",
   },
   #[cfg(feature = "signature-netlify")]
   Signature {
@@ -369,6 +609,12 @@ const SIGNATURES: &[Signature] = &[
     env_var: "NUGET_API_KEY",
     pattern: r"(?-u:\b)oy2[A-Za-z0-9]{40,}(?-u:\b)",
   },
+  #[cfg(feature = "signature-nvidia")]
+  Signature {
+    name: "NVIDIA API key",
+    env_var: "NVIDIA_API_KEY",
+    pattern: r"(?-u:\b)nvapi-[A-Za-z0-9_\-]{64}(?-u:\b)",
+  },
   #[cfg(feature = "signature-1password")]
   Signature {
     name: "1Password credential",
@@ -385,11 +631,41 @@ const SIGNATURES: &[Signature] = &[
     // Segment lengths around the infix are 20 (legacy) or 58/74 (current).
     pattern: r"(?-u:\b)(?:sk-(?:proj|svcacct|admin)-(?:[A-Za-z0-9_\-]{74}|[A-Za-z0-9_\-]{58})T3BlbkFJ(?:[A-Za-z0-9_\-]{74}|[A-Za-z0-9_\-]{58})|sk-[A-Za-z0-9]{20}T3BlbkFJ[A-Za-z0-9]{20})(?-u:\b)",
   },
+  #[cfg(feature = "signature-openrouter")]
+  Signature {
+    name: "OpenRouter API key",
+    env_var: "OPENROUTER_API_KEY",
+    pattern: r"(?-u:\b)sk-or-v1-[a-f0-9]{64}(?-u:\b)",
+  },
+  #[cfg(feature = "signature-paddle")]
+  Signature {
+    name: "Paddle API key",
+    env_var: "PADDLE_API_KEY",
+    pattern: r"(?-u:\b)pdl_(?:live|sdbx)_apikey_[a-z0-9]{26}_[A-Za-z0-9]{22}_[A-Za-z0-9]{3}(?-u:\b)",
+  },
+  #[cfg(feature = "signature-pagarme")]
+  Signature {
+    name: "Pagar.me API key",
+    env_var: "PAGARME_API_KEY",
+    pattern: r"(?-u:\b)ak_live_[A-Za-z0-9]{30}(?-u:\b)",
+  },
+  #[cfg(feature = "signature-paypal")]
+  Signature {
+    name: "PayPal OAuth access token",
+    env_var: "PAYPAL_ACCESS_TOKEN",
+    pattern: r"(?-u:\b)A21AA[A-Za-z0-9_\-]{80,}(?-u:\b)",
+  },
   #[cfg(feature = "signature-perplexity")]
   Signature {
     name: "Perplexity API key",
     env_var: "PERPLEXITY_API_KEY",
     pattern: r"(?-u:\b)pplx-[A-Za-z0-9]{48}(?-u:\b)",
+  },
+  #[cfg(feature = "signature-pinecone")]
+  Signature {
+    name: "Pinecone API key",
+    env_var: "PINECONE_API_KEY",
+    pattern: r"(?-u:\b)pcsk_[A-Za-z0-9]{5,6}_[A-Za-z0-9]{63}(?-u:\b)",
   },
   #[cfg(feature = "signature-planetscale")]
   Signature {
@@ -424,6 +700,12 @@ const SIGNATURES: &[Signature] = &[
     // an underscore rather than a leading dollar sign.
     pattern: r"(?:\$pbkdf2(?:-(?:sha1|sha224|sha256|sha384|sha512))?|pbkdf2_(?:sha1|sha224|sha256|sha384|sha512))\$[0-9]+\$[A-Za-z0-9+/_\-=]+\$[A-Za-z0-9+/_\-=]+",
   },
+  #[cfg(feature = "signature-prefect")]
+  Signature {
+    name: "Prefect API token",
+    env_var: "PREFECT_API_KEY",
+    pattern: r"(?-u:\b)pnu_[A-Za-z0-9]{36}(?-u:\b)",
+  },
   #[cfg(feature = "signature-pulumi")]
   Signature {
     name: "Pulumi access token",
@@ -436,11 +718,23 @@ const SIGNATURES: &[Signature] = &[
     env_var: "PYPI_API_TOKEN",
     pattern: r"(?-u:\b)pypi-[A-Za-z0-9_\-]{50,}(?-u:\b)",
   },
+  #[cfg(feature = "signature-ramp")]
+  Signature {
+    name: "Ramp API secret",
+    env_var: "RAMP_SECRET",
+    pattern: r"(?-u:\b)ramp_sec_[A-Za-z0-9]{48}(?-u:\b)",
+  },
   #[cfg(feature = "signature-razorpay")]
   Signature {
     name: "Razorpay key",
     env_var: "RAZORPAY_KEY_SECRET",
     pattern: r"(?-u:\b)rzp_(?:live|test)_[A-Za-z0-9]{14,}(?-u:\b)",
+  },
+  #[cfg(feature = "signature-readme")]
+  Signature {
+    name: "ReadMe API token",
+    env_var: "README_API_KEY",
+    pattern: r"(?-u:\b)rdme_[a-z0-9]{70}(?-u:\b)",
   },
   #[cfg(feature = "signature-render")]
   Signature {
@@ -454,11 +748,41 @@ const SIGNATURES: &[Signature] = &[
     env_var: "REPLICATE_API_TOKEN",
     pattern: r"(?-u:\b)r8_[A-Za-z0-9]{20,}(?-u:\b)",
   },
+  #[cfg(feature = "signature-resend")]
+  Signature {
+    name: "Resend API key",
+    env_var: "RESEND_API_KEY",
+    pattern: r"(?-u:\b)re_[A-Za-z0-9_]{32,}(?-u:\b)",
+  },
+  #[cfg(feature = "signature-robinhood")]
+  Signature {
+    name: "Robinhood Crypto API key",
+    env_var: "ROBINHOOD_API_KEY",
+    pattern: r"(?-u:\b)rh-api-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?-u:\b)",
+  },
+  #[cfg(feature = "signature-rootly")]
+  Signature {
+    name: "Rootly API key",
+    env_var: "ROOTLY_API_KEY",
+    pattern: r"(?-u:\b)rootly_[a-f0-9]{64}(?-u:\b)",
+  },
   #[cfg(feature = "signature-rubygems")]
   Signature {
     name: "RubyGems API key",
     env_var: "RUBYGEMS_API_KEY",
     pattern: r"(?-u:\b)rubygems_[a-f0-9]{48}(?-u:\b)",
+  },
+  #[cfg(feature = "signature-saladcloud")]
+  Signature {
+    name: "SaladCloud API key",
+    env_var: "SALAD_API_KEY",
+    pattern: r"(?-u:\b)salad_cloud_[0-9A-Za-z]{1,7}_[0-9A-Za-z]{7,235}(?-u:\b)",
+  },
+  #[cfg(feature = "signature-scalingo")]
+  Signature {
+    name: "Scalingo API token",
+    env_var: "SCALINGO_API_TOKEN",
+    pattern: r"(?-u:\b)tk-us-[A-Za-z0-9_\-]{48}(?-u:\b)",
   },
   #[cfg(feature = "signature-scrypt")]
   Signature {
@@ -478,7 +802,7 @@ const SIGNATURES: &[Signature] = &[
   Signature {
     name: "Sentry auth token",
     env_var: "SENTRY_AUTH_TOKEN",
-    pattern: r"(?-u:\b)sntrys_[A-Za-z0-9]{20,}(?-u:\b)",
+    pattern: r"(?-u:\b)sntry[su]_[A-Za-z0-9]{20,}(?-u:\b)",
   },
   #[cfg(feature = "signature-sentry-dsn")]
   Signature {
@@ -492,6 +816,32 @@ const SIGNATURES: &[Signature] = &[
     //   https://<public>:<secret>@<host>/<project-id>
     // is deprecated but still accepted.
     pattern: r"(?-u:\b)https://[a-f0-9]{32}(?::[a-f0-9]{32})?@[A-Za-z0-9.\-]+\.ingest(?:\.[a-z]{2})?\.sentry\.io/[0-9]+(?-u:\b)",
+  },
+  #[cfg(feature = "signature-settlemint")]
+  Signature {
+    name: "SettleMint access token",
+    env_var: "SETTLEMINT_ACCESS_TOKEN",
+    pattern: r"(?-u:\b)sm_(?:pat|aat|sat)_[A-Za-z0-9]{16}(?-u:\b)",
+  },
+  #[cfg(feature = "signature-sha256crypt")]
+  Signature {
+    name: "SHA-256 crypt password hash",
+    env_var: "SHA256CRYPT_PASSWORD_HASH",
+    // crypt(3) SHA-256: $5$[rounds=N$]<salt up to 16>$<43-char hash>.
+    pattern: r"\$5\$(?:rounds=[0-9]+\$)?[A-Za-z0-9./]{1,16}\$[A-Za-z0-9./]{43}",
+  },
+  #[cfg(feature = "signature-sha512crypt")]
+  Signature {
+    name: "SHA-512 crypt password hash",
+    env_var: "SHA512CRYPT_PASSWORD_HASH",
+    // crypt(3) SHA-512: $6$[rounds=N$]<salt up to 16>$<86-char hash>.
+    pattern: r"\$6\$(?:rounds=[0-9]+\$)?[A-Za-z0-9./]{1,16}\$[A-Za-z0-9./]{86}",
+  },
+  #[cfg(feature = "signature-shippo")]
+  Signature {
+    name: "Shippo API token",
+    env_var: "SHIPPO_API_TOKEN",
+    pattern: r"(?-u:\b)shippo_(?:live|test)_[a-fA-F0-9]{40}(?-u:\b)",
   },
   #[cfg(feature = "signature-shopify")]
   Signature {
@@ -511,11 +861,17 @@ const SIGNATURES: &[Signature] = &[
     env_var: "SLACK_WEBHOOK_URL",
     pattern: r"https://hooks\.slack\.com/services/T[A-Z0-9]{8,}/B[A-Z0-9]{8,}/[A-Za-z0-9]{20,}",
   },
+  #[cfg(feature = "signature-sourcegraph-cody")]
+  Signature {
+    name: "Sourcegraph Cody API key",
+    env_var: "SOURCEGRAPH_CODY_API_KEY",
+    pattern: r"(?-u:\b)slk_[a-f0-9]{64}(?-u:\b)",
+  },
   #[cfg(feature = "signature-square")]
   Signature {
     name: "Square access token",
     env_var: "SQUARE_ACCESS_TOKEN",
-    pattern: r"(?-u:\b)(?:EAAA|sq0atp-)[A-Za-z0-9_\-+=]{22,60}(?-u:\b)",
+    pattern: r"(?-u:\b)(?:EAAA|sq0atp-|sq0csp-)[A-Za-z0-9_\-+=]{22,60}(?-u:\b)",
   },
   #[cfg(feature = "signature-sonar")]
   Signature {
@@ -541,11 +897,24 @@ const SIGNATURES: &[Signature] = &[
     env_var: "STRIPE_PUBLISHABLE_KEY",
     pattern: r"(?-u:\b)pk_(?:live|test)_[A-Za-z0-9]{20,}(?-u:\b)",
   },
+  #[cfg(feature = "signature-stripe-webhook")]
+  Signature {
+    name: "Stripe webhook signing secret",
+    env_var: "STRIPE_WEBHOOK_SECRET",
+    pattern: r"(?-u:\b)whsec_[A-Za-z0-9]{32,}(?-u:\b)",
+  },
   #[cfg(feature = "signature-supabase")]
   Signature {
     name: "Supabase service token",
     env_var: "SUPABASE_SERVICE_ROLE_KEY",
-    pattern: r"(?-u:\b)sbp_[a-f0-9]{40}(?-u:\b)",
+    // Legacy `sbp_` and the current (2024+) `sb_secret_` key format.
+    pattern: r"(?-u:\b)(?:sbp_[a-f0-9]{40}|sb_secret_[A-Za-z0-9_\-]{20,})(?-u:\b)",
+  },
+  #[cfg(feature = "signature-supabase-publishable")]
+  Signature {
+    name: "Supabase publishable key",
+    env_var: "SUPABASE_PUBLISHABLE_KEY",
+    pattern: r"(?-u:\b)sb_publishable_[A-Za-z0-9_\-]{20,}(?-u:\b)",
   },
   #[cfg(feature = "signature-tailscale")]
   Signature {
@@ -558,6 +927,12 @@ const SIGNATURES: &[Signature] = &[
     name: "Telegram bot token",
     env_var: "TELEGRAM_BOT_TOKEN",
     pattern: r"(?-u:\b)[0-9]{8,10}:[A-Za-z0-9_\-]{35}(?-u:\b)",
+  },
+  #[cfg(feature = "signature-tencent")]
+  Signature {
+    name: "Tencent Cloud SecretId",
+    env_var: "TENCENTCLOUD_SECRET_ID",
+    pattern: r"(?-u:\b)AKID[A-Za-z0-9]{32}(?-u:\b)",
   },
   #[cfg(feature = "signature-twilio")]
   Signature {
@@ -575,6 +950,12 @@ const SIGNATURES: &[Signature] = &[
     env_var: "TYPEFORM_PERSONAL_ACCESS_TOKEN",
     pattern: r"(?-u:\b)tfp_[A-Za-z0-9_\-]{30,}(?-u:\b)",
   },
+  #[cfg(feature = "signature-ubidots")]
+  Signature {
+    name: "Ubidots API token",
+    env_var: "UBIDOTS_API_TOKEN",
+    pattern: r"(?-u:\b)BBFF-[0-9a-zA-Z]{30}(?-u:\b)",
+  },
   #[cfg(feature = "signature-vercel")]
   Signature {
     name: "Vercel access token",
@@ -588,7 +969,19 @@ const SIGNATURES: &[Signature] = &[
     //   vcs_ support access token
     // The suffix is opaque base62, typically around 56 chars.
     // https://vercel.com/docs/sign-in-with-vercel/tokens
-    pattern: r"(?-u:\b)vc[pcakrs]_[A-Za-z0-9]{40,}(?-u:\b)",
+    pattern: r"(?-u:\b)vc[piarks]_[A-Za-z0-9]{40,}(?-u:\b)",
+  },
+  #[cfg(feature = "signature-wakatime")]
+  Signature {
+    name: "WakaTime API key",
+    env_var: "WAKATIME_API_KEY",
+    pattern: r"(?-u:\b)waka_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?-u:\b)",
+  },
+  #[cfg(feature = "signature-xai")]
+  Signature {
+    name: "xAI API key",
+    env_var: "XAI_API_KEY",
+    pattern: r"(?-u:\b)xai-[0-9A-Za-z_]{80}(?-u:\b)",
   },
   #[cfg(feature = "signature-xata")]
   Signature {
@@ -601,5 +994,12 @@ const SIGNATURES: &[Signature] = &[
     name: "Yandex Cloud IAM token",
     env_var: "YC_TOKEN",
     pattern: r"(?-u:\b)AQVN[A-Za-z0-9_\-]{35,38}(?-u:\b)",
+  },
+  #[cfg(feature = "signature-yescrypt")]
+  Signature {
+    name: "yescrypt password hash",
+    env_var: "YESCRYPT_PASSWORD_HASH",
+    // yescrypt (default on modern Linux shadow): $y$<params>$<salt>$<hash>.
+    pattern: r"\$y\$[A-Za-z0-9./]+\$[A-Za-z0-9./]+\$[A-Za-z0-9./]{20,}",
   },
 ];

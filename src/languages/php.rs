@@ -1,16 +1,18 @@
 use std::cell::RefCell;
 
 use mago_ast::{
-  Argument, ArgumentList, ArrayElement, Assignment, AssignmentOperator, Binary,
-  BinaryOperator, Call, ClassLikeConstant, ClassLikeConstantItem,
-  ClassLikeMember, ClassLikeMemberSelector, CompositeString, Conditional,
-  Constant, ConstantItem, Construct, DeclareBody, Expression,
-  ExpressionStatement, ForBody, ForeachBody, FunctionLikeParameterList,
-  Identifier, IfBody, IfStatementBody, KeyValueArrayElement, LegacyArray,
-  Literal, LiteralString, Match, MatchArm, MethodBody, NamedArgument,
-  NamespaceBody, PlainProperty, PositionalArgument, Property,
+  Access, Argument, ArgumentList, ArrayAccess, ArrayElement, Assignment,
+  AssignmentOperator, Binary, BinaryOperator, Call, ClassLikeConstant,
+  ClassLikeConstantItem, ClassLikeMember, ClassLikeMemberSelector,
+  CompositeString, Conditional, Constant, ConstantItem, Construct, DeclareBody,
+  Expression, ExpressionStatement, ForBody, ForeachBody,
+  FunctionLikeParameterList, Identifier, IfBody, IfStatementBody,
+  KeyValueArrayElement, LegacyArray, Literal, LiteralString, Match, MatchArm,
+  MethodBody, NamedArgument, NamespaceBody, NullSafePropertyAccess,
+  PlainProperty, PositionalArgument, Property, PropertyAccess,
   PropertyConcreteItem, PropertyItem, Sequence, Statement, StaticConcreteItem,
-  StaticItem, StringPart, SwitchBody, SwitchCase, Variable, WhileBody,
+  StaticItem, StringPart, SwitchBody, SwitchCase, ValueArrayElement, Variable,
+  WhileBody,
 };
 use mago_interner::ThreadedInterner;
 use mago_parser::parse_source;
@@ -21,7 +23,7 @@ use crate::{
   analysis::{Analyzer, CallFrame, FunctionSignature},
   diagnostic::{
     AssignmentType, SourceFileSpan, SourcePosition, SourceSpan,
-    check_assignment, check_value,
+    check_assignment, check_header_assignment, check_value,
   },
   processing::SourceContext,
   secrets::{
@@ -68,14 +70,21 @@ macro_rules! lookup_variable_name {
 }
 
 pub fn parse(context: &SourceContext) -> bool {
-  let Some(source) = context.body else {
+  let Some(body) = context.body else {
     return false;
   };
+
+  let markup = crate::languages::html::scan(context, &mask_php(body));
+
+  scan(context, body) || markup
+}
+
+pub fn scan(context: &SourceContext, source: &str) -> bool {
   let path_str = context.file_abs_path.to_str().unwrap_or_default();
 
   let interner = ThreadedInterner::new();
-  let source = Source::standalone(&interner, path_str, source);
-  let (program, parse_error) = parse_source(&interner, &source);
+  let parsed = Source::standalone(&interner, path_str, source);
+  let (program, parse_error) = parse_source(&interner, &parsed);
 
   if parse_error.is_some() {
     return false;
@@ -101,6 +110,38 @@ pub fn parse(context: &SourceContext) -> bool {
   true
 }
 
+// Blanks every `<?php ... ?>` region (newlines kept) so the HTML markup pass
+// sees only inline markup, never PHP code or the contents of PHP strings. Byte
+// length and line breaks are preserved so reported spans stay accurate.
+fn mask_php(source: &str) -> String {
+  let bytes = source.as_bytes();
+  let mut masked = Vec::with_capacity(bytes.len());
+  let mut i = 0;
+
+  while i < bytes.len() {
+    if bytes[i] == b'<' && bytes.get(i + 1) == Some(&b'?') {
+      let mut end = bytes.len();
+      let mut j = i + 2;
+      while j + 1 < bytes.len() {
+        if bytes[j] == b'?' && bytes[j + 1] == b'>' {
+          end = j + 2;
+          break;
+        }
+        j += 1;
+      }
+      for &byte in &bytes[i..end] {
+        masked.push(if byte == b'\n' { b'\n' } else { b' ' });
+      }
+      i = end;
+    } else {
+      masked.push(bytes[i]);
+      i += 1;
+    }
+  }
+
+  String::from_utf8(masked).unwrap_or_else(|_| source.to_owned())
+}
+
 fn process_statements(
   context: &mut PhpContext,
   statements: &Sequence<Statement>,
@@ -116,7 +157,7 @@ fn process_statement(context: &mut PhpContext, statement: &Statement) {
       process_statements(context, &block.statements);
     }
     Statement::Function(function) => {
-      let name = context.interner.lookup(&function.name.value);
+      let name = context.interner.lookup(&function.name.value).to_owned();
       register_signature(context, &name, &function.parameter_list);
       process_parameters(context, &function.parameter_list);
       process_statements(context, &function.body.statements);
@@ -295,17 +336,28 @@ fn process_expression(context: &mut PhpContext, expression: &Expression) {
 
       process_named_arguments(context, argument_list);
 
-      if let Some(callee_name) = &callee_name {
-        if callee_name == "define" {
+      if call_type == Function
+        && let Some(callee_name) = &callee_name
+      {
+        if callee_name == "header" {
+          process_header_function(context, argument_list);
+        } else if callee_name == "setcookie" || callee_name == "setrawcookie" {
+          process_setcookie(context, argument_list);
+        } else if callee_name == "define" {
           process_define(context, argument_list);
         } else {
           process_positional_arguments(
             context,
             callee_name,
             argument_list,
-            call_type == Function,
+            true,
           );
         }
+      } else if call_type == Method
+        && let Some(method) = &callee_name
+        && HEADER_METHODS.contains(&method.as_str())
+      {
+        process_header_method(context, argument_list);
       }
 
       for argument in argument_list.arguments.iter() {
@@ -320,8 +372,8 @@ fn process_expression(context: &mut PhpContext, expression: &Expression) {
       lhs,
       operator: AssignmentOperator::Assign(_) | AssignmentOperator::Coalesce(_),
       rhs,
-    }) => {
-      if let E::Variable(Variable::Direct(variable)) = lhs.as_ref() {
+    }) => match lhs.as_ref() {
+      E::Variable(Variable::Direct(variable)) => {
         let name = lookup_variable_name!(context, &variable);
         check_expression_value(
           context,
@@ -330,10 +382,38 @@ fn process_expression(context: &mut PhpContext, expression: &Expression) {
           &rhs.span(),
           AssignmentType::Variable,
         );
-      } else {
-        process_expression(context, rhs);
       }
-    }
+      E::Access(
+        Access::Property(PropertyAccess { property, .. })
+        | Access::NullSafeProperty(NullSafePropertyAccess { property, .. }),
+      ) => {
+        if let Some(name) = callee_member(context, property) {
+          check_expression_value(
+            context,
+            &name,
+            rhs,
+            &rhs.span(),
+            AssignmentType::Property,
+          );
+        } else {
+          process_expression(context, rhs);
+        }
+      }
+      E::ArrayAccess(ArrayAccess { index, .. }) => {
+        if let Some(key) = string_literal(context, index) {
+          check_expression_value(
+            context,
+            &key,
+            rhs,
+            &rhs.span(),
+            AssignmentType::Element,
+          );
+        } else {
+          process_expression(context, rhs);
+        }
+      }
+      _ => process_expression(context, rhs),
+    },
 
     E::Array(array) => {
       process_array_elements(context, &array.elements);
@@ -462,8 +542,6 @@ fn process_members(
         process_property(context, property);
       }
       ClassLikeMember::Method(method) => {
-        let name = context.interner.lookup(&method.name.value);
-        register_signature(context, &name, &method.parameter_list);
         process_parameters(context, &method.parameter_list);
         if let MethodBody::Concrete(block) = &method.body {
           process_statements(context, &block.statements);
@@ -512,9 +590,9 @@ fn callee_member(
   }
 }
 
-fn process_positional_arguments<'a>(
+fn process_positional_arguments(
   context: &mut PhpContext,
-  callee_name: &'a str,
+  callee_name: &str,
   ArgumentList { arguments, .. }: &ArgumentList,
   save_call_frame: bool,
 ) {
@@ -554,6 +632,109 @@ fn process_positional_arguments<'a>(
   }
 }
 
+const HEADER_METHODS: &[&str] =
+  &["addHeader", "setHeader", "withAddedHeader", "withHeader"];
+
+fn process_header_function(
+  context: &mut PhpContext,
+  argument_list: &ArgumentList,
+) {
+  let Some(Argument::Positional(PositionalArgument { value, .. })) =
+    argument_list.arguments.iter().next()
+  else {
+    return;
+  };
+  let Some(header) = string_literal(context, value) else {
+    return;
+  };
+  let Some((name, header_value)) = header.split_once(':') else {
+    return;
+  };
+
+  let name = name.trim();
+  let header_value = header_value.trim();
+  if name.is_empty() || header_value.is_empty() {
+    return;
+  }
+
+  let span = value.span();
+  if context.already_emitted(&span) {
+    return;
+  }
+
+  context.record_emitted(&span);
+
+  if let Some(d) =
+    check_header_assignment(name, header_value, context.source_context, || {
+      compute_source_span(context, &span)
+    })
+  {
+    context.source_context.emit_diagnostic(d);
+  }
+}
+
+fn process_setcookie(context: &mut PhpContext, argument_list: &ArgumentList) {
+  // setcookie("name", "value", ...) / setrawcookie(...): arg 0 is the cookie
+  // name (used as the secret name) and arg 1 is its value, both stored in a
+  // Set-Cookie response header.
+  let mut positionals = argument_list.arguments.iter().filter_map(|argument| {
+    if let Argument::Positional(PositionalArgument { value, .. }) = argument {
+      Some(value)
+    } else {
+      None
+    }
+  });
+
+  let Some(name_expr) = positionals.next() else {
+    return;
+  };
+  let Some(value_expr) = positionals.next() else {
+    return;
+  };
+  let Some(name) = string_literal(context, name_expr) else {
+    return;
+  };
+
+  check_expression_value(
+    context,
+    &name,
+    value_expr,
+    &value_expr.span(),
+    AssignmentType::Header,
+  );
+}
+
+fn process_header_method(
+  context: &mut PhpContext,
+  argument_list: &ArgumentList,
+) {
+  let mut positionals = argument_list.arguments.iter().filter_map(|argument| {
+    if let Argument::Positional(PositionalArgument { value, .. }) = argument {
+      Some(value)
+    } else {
+      None
+    }
+  });
+
+  let Some(name_expr) = positionals.next() else {
+    return;
+  };
+  let Some(value_expr) = positionals.next() else {
+    return;
+  };
+  let Some(name) = string_literal(context, name_expr) else {
+    return;
+  };
+
+  check_expression_value(
+    context,
+    &name,
+    value_expr,
+    &value_expr.span(),
+    AssignmentType::Header,
+  );
+}
+
 fn resolve_arguments(
   context: &mut PhpContext,
   signature: &FunctionSignature,
@@ -584,7 +765,7 @@ fn process_named_arguments(
     let name = context.interner.lookup(&name.value);
     check_expression_value(
       context,
-      &name,
+      name,
       value,
       &value.span(),
       AssignmentType::Argument,
@@ -641,7 +822,7 @@ fn process_class_constant(
     let name_str = context.interner.lookup(&name.value);
     check_expression_value(
       context,
-      &name_str,
+      name_str,
       value,
       &value.span(),
       AssignmentType::Constant,
@@ -657,7 +838,7 @@ fn process_constant(
     let name_str = context.interner.lookup(&name.value);
     check_expression_value(
       context,
-      &name_str,
+      name_str,
       value,
       &value.span(),
       AssignmentType::Constant,
@@ -703,13 +884,22 @@ fn check_expression_value(
     }
 
     context.record_emitted(&value_span);
-    if let Some(d) = check_assignment(
-      &normalize_name(&name.to_owned()),
-      &normalize_value(&value),
-      assignment_type,
-      context.source_context,
-      || compute_source_span(context, span),
-    ) {
+
+    let diag = if assignment_type == AssignmentType::Header {
+      check_header_assignment(name, &value, context.source_context, || {
+        compute_source_span(context, span)
+      })
+    } else {
+      check_assignment(
+        &normalize_name(&name.to_owned()),
+        &normalize_value(&value),
+        assignment_type,
+        context.source_context,
+        || compute_source_span(context, span),
+      )
+    };
+
+    if let Some(d) = diag {
       context.source_context.emit_diagnostic(d);
     }
     return;
@@ -782,7 +972,38 @@ fn check_expression_value(
       }
       process_expression(context, expression);
     }
+    E::Array(array) => {
+      process_named_array_elements(
+        context,
+        name,
+        &array.elements,
+        assignment_type,
+      );
+    }
+    E::LegacyArray(LegacyArray { elements, .. }) => {
+      process_named_array_elements(context, name, elements, assignment_type);
+    }
     _ => process_expression(context, expression),
+  }
+}
+
+fn process_named_array_elements(
+  context: &mut PhpContext,
+  name: &str,
+  elements: &mago_ast::sequence::TokenSeparatedSequence<ArrayElement>,
+  assignment_type: AssignmentType,
+) {
+  process_array_elements(context, elements);
+  for element in elements.iter() {
+    if let ArrayElement::Value(ValueArrayElement { value }) = element {
+      check_expression_value(
+        context,
+        name,
+        value,
+        &value.span(),
+        assignment_type,
+      );
+    }
   }
 }
 
@@ -812,6 +1033,33 @@ fn process_array_elements(
     let Some(key_str) = string_literal(context, key) else {
       continue;
     };
+
+    // ['headers' => ['Header-Name' => value]] (Guzzle/Symfony): each entry of
+    // a nested `headers` array is an HTTP header.
+    if key_str == "headers"
+      && let E::Array(array) = &**value
+    {
+      for header in array.elements.iter() {
+        let ArrayElement::KeyValue(KeyValueArrayElement { key, value, .. }) =
+          header
+        else {
+          continue;
+        };
+
+        if let Some(name) = string_literal(context, key) {
+          check_expression_value(
+            context,
+            &name,
+            value,
+            &value.span(),
+            AssignmentType::Header,
+          );
+        }
+      }
+
+      continue;
+    }
+
     check_expression_value(
       context,
       &key_str,
@@ -905,12 +1153,23 @@ fn compute_source_span(
   let mut cache = context.line_starts.borrow_mut();
   let starts = cache.get_or_insert_with(|| compute_line_starts(body));
 
+  let mut start = position_from_line_starts(starts, span.start.offset);
+  let mut end = position_from_line_starts(starts, span.end.offset);
+
+  let parent_line = context.source_context.parent_line;
+  let parent_col = context.source_context.parent_col;
+  if start.line == 1 {
+    start.column += parent_col;
+  }
+  if end.line == 1 {
+    end.column += parent_col;
+  }
+  start.line += parent_line;
+  end.line += parent_line;
+
   SourceFileSpan {
     file_abs_path: context.source_context.file_abs_path.to_path_buf(),
-    file_span: Some(SourceSpan {
-      start: position_from_line_starts(starts, span.start.offset),
-      end: position_from_line_starts(starts, span.end.offset),
-    }),
+    file_span: Some(SourceSpan { start, end }),
   }
 }
 

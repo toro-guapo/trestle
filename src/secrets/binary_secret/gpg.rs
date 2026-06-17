@@ -82,7 +82,7 @@ fn parse_algorithm(id: u8) -> Option<GpgAlgorithm> {
   // See:
   // https://www.iana.org/assignments/openpgp/openpgp.xhtml#openpgp-public-key-algorithms
   match id {
-    1 | 2 | 3 => Some(GpgAlgorithm::Rsa),
+    1..=3 => Some(GpgAlgorithm::Rsa),
     16 => Some(GpgAlgorithm::Elgamal),
     17 => Some(GpgAlgorithm::Dsa),
     18 => Some(GpgAlgorithm::Ecdh),
@@ -171,7 +171,7 @@ fn validate_body(
     *source.get(offset + 3)?,
     *source.get(offset + 4)?,
   ]);
-  if ts < MIN_TIMESTAMP || ts > MAX_TIMESTAMP {
+  if !(MIN_TIMESTAMP..=MAX_TIMESTAMP).contains(&ts) {
     return None;
   }
 

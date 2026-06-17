@@ -3330,6 +3330,8 @@ pub const COMMON_ENGLISH_WORDS: &[&str] = &[
   "herself",
   "hewlett",
   "hidden",
+  "hierarchic",
+  "hierarchical",
   "hierarchy",
   "higher",
   "highest",

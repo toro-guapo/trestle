@@ -17,9 +17,9 @@ static TOKEN_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
   Regex::new(concat!(
     r"(?m)-{4,5} ?BEGIN ",
     r"([ A-Z0-9]*PRIVATE KEY(?:[ A-Z]* BLOCK)?)",
-    r" ?-{4,5}[ \t]*\n",
+    r" ?-{4,5}[ \t]*\r?\n",
     r"(?:.*\n)*?",
-    r"[A-Za-z0-9+/]{20}[A-Za-z0-9+/=]*\n",
+    r"[A-Za-z0-9+/]{20}[A-Za-z0-9+/=]*\r?\n",
     r"(?:.*\n)*?",
     r"-{4,5} ?END ",
     r"([ A-Z0-9]*PRIVATE KEY(?:[ A-Z]* BLOCK)?)",

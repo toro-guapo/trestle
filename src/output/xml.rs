@@ -64,10 +64,8 @@ fn emit_xml(
     .write_event(Event::End(BytesEnd::new("diagnostics")))
     .ok();
 
-  if show_summary {
-    if let Some(stats) = stats {
-      write_summary(&mut xml, build_summary(stats, summary));
-    }
+  if show_summary && let Some(stats) = stats {
+    write_summary(&mut xml, build_summary(stats, summary));
   }
 
   xml.write_event(Event::End(BytesEnd::new("trestle"))).ok();

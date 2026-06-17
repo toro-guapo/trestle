@@ -6,7 +6,7 @@ use crate::{
   analysis::{Analyzer, CallFrame, FunctionSignature},
   diagnostic::{
     AssignmentType, Diagnostic, SourceFileSpan, SourceSpan, check_assignment,
-    check_value, offset_to_position,
+    check_header_assignment, check_value, offset_to_position,
   },
   processing::SourceContext,
   secrets::{
@@ -235,16 +235,15 @@ fn extract_assignee_name(node: Node, source: &[u8]) -> Option<String> {
 // Method calls
 // -----------------------------------------------------------------------------
 
-const NAME_VALUE_SETTERS: &[&str] = &[
+const HEADER_SETTERS: &[&str] = &[
   "addHeader",
-  "addProperty",
-  "put",
-  "putIfAbsent",
-  "set",
+  "addRequestProperty",
   "setHeader",
-  "setProperty",
   "setRequestProperty",
 ];
+
+const NAME_VALUE_SETTERS: &[&str] =
+  &["addProperty", "put", "putIfAbsent", "set", "setProperty"];
 
 const MAP_OF_NAMES: &[&str] = &["of", "ofEntries"];
 
@@ -266,18 +265,20 @@ fn process_method_invocation(ctx: &mut JavaContext, node: Node, source: &[u8]) {
   // Pattern 1: name+value setters take a string key as arg[0] and a
   // value as arg[1]. The first arg is the secret name; we use it as
   // such and let `check_assignment` decide.
-  if NAME_VALUE_SETTERS.contains(&method_name.as_str()) && args.len() >= 2 {
-    if let Some(key) = extract_string(args[0], source) {
-      check_value_node(
-        ctx,
-        Some(&key),
-        args[1],
-        args[1],
-        source,
-        AssignmentType::Argument,
-      );
-      return;
-    }
+  let setter_type = if HEADER_SETTERS.contains(&method_name.as_str()) {
+    Some(AssignmentType::Header)
+  } else if NAME_VALUE_SETTERS.contains(&method_name.as_str()) {
+    Some(AssignmentType::Argument)
+  } else {
+    None
+  };
+
+  if let Some(setter_type) = setter_type
+    && args.len() >= 2
+    && let Some(key) = extract_string(args[0], source)
+  {
+    check_value_node(ctx, Some(&key), args[1], args[1], source, setter_type);
+    return;
   }
 
   // Pattern 2: `Map.of("k1", "v1", "k2", "v2", ...)` - alternating
@@ -322,9 +323,13 @@ fn process_method_invocation(ctx: &mut JavaContext, node: Node, source: &[u8]) {
     check_value_node(ctx, None, *arg, *arg, source, AssignmentType::Argument);
   }
 
-  // Pattern 4: cross-call resolution. Collect string args and either
-  // resolve immediately if we know the signature, or buffer until the
-  // declaration is seen.
+  // Pattern 4: cross-call resolution for unqualified calls only. A
+  // qualified call like `obj.connect(...)` targets a method whose receiver
+  // type we cannot determine, so a same-named signature must not be applied.
+  if node.child_by_field_name("object").is_some() {
+    return;
+  }
+
   let extracted: Vec<(String, (usize, usize))> = args
     .iter()
     .filter_map(|arg| {
@@ -637,6 +642,11 @@ fn check_value_node(
 
     let normalized = normalize_value(&value);
     let diag: Option<Diagnostic> = match name {
+      Some(n) if assignment_type == AssignmentType::Header => {
+        check_header_assignment(n, &value, ctx.source_context, || {
+          compute_span(ctx, span_node)
+        })
+      }
       Some(n) => check_assignment(
         &normalize_name(&n.to_owned()),
         &normalized,
@@ -690,6 +700,16 @@ fn check_value_node(
         for arg in named_children(args) {
           check_value_node(ctx, name, arg, span_node, source, assignment_type);
         }
+      }
+    }
+    "array_initializer" => {
+      for child in named_children(value_node) {
+        check_value_node(ctx, name, child, child, source, assignment_type);
+      }
+    }
+    "array_creation_expression" => {
+      if let Some(init) = value_node.child_by_field_name("value") {
+        check_value_node(ctx, name, init, init, source, assignment_type);
       }
     }
     _ => {}

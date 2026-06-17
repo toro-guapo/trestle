@@ -2,8 +2,8 @@ use toml_edit::{ImDocument, Item, Value};
 
 use crate::{
   diagnostic::{
-    AssignmentType, SourceFileSpan, SourceSpan, check_assignment, check_value,
-    offset_to_position,
+    AssignmentType, SourceFileSpan, SourceSpan, check_assignment_in_scope,
+    check_value, offset_to_position,
   },
   processing::SourceContext,
   secrets::{
@@ -30,21 +30,34 @@ pub fn parse(context: &SourceContext) -> bool {
     source_context: context,
   };
 
-  process_table(&mut ctx, doc.as_table());
+  process_table(&mut ctx, &[], doc.as_table());
 
   true
 }
 
-fn process_table(ctx: &mut TomlContext, table: &toml_edit::Table) {
+fn process_table(
+  ctx: &mut TomlContext,
+  scope: &[&str],
+  table: &toml_edit::Table,
+) {
   for (key, item) in table.iter() {
     match item {
       Item::Value(value) => {
-        process_value_with_key(ctx, key, value);
+        process_value_with_key(ctx, scope, key, value);
       }
-      Item::Table(sub) => process_table(ctx, sub),
+      Item::Table(sub) => {
+        let mut child = scope.to_vec();
+        child.push(key);
+        process_table(ctx, &child, sub);
+      }
+
+      // An array of tables ([[x]]) is keyed like a YAML sequence: the key `x`
+      // scopes the fields inside, while the repeated elements are anonymous.
       Item::ArrayOfTables(aot) => {
+        let mut child = scope.to_vec();
+        child.push(key);
         for sub in aot.iter() {
-          process_table(ctx, sub);
+          process_table(ctx, &child, sub);
         }
       }
       Item::None => {}
@@ -52,7 +65,12 @@ fn process_table(ctx: &mut TomlContext, table: &toml_edit::Table) {
   }
 }
 
-fn process_value_with_key(ctx: &mut TomlContext, key: &str, value: &Value) {
+fn process_value_with_key(
+  ctx: &mut TomlContext,
+  scope: &[&str],
+  key: &str,
+  value: &Value,
+) {
   match value {
     Value::String(s) => {
       let s = s.value();
@@ -60,7 +78,8 @@ fn process_value_with_key(ctx: &mut TomlContext, key: &str, value: &Value) {
         let span = value.span();
         let key = key.to_owned();
         let value = s.to_owned();
-        if let Some(d) = check_assignment(
+        if let Some(d) = check_assignment_in_scope(
+          scope,
           &normalize_name(&key),
           &normalize_value(&value),
           AssignmentType::Element,
@@ -72,20 +91,28 @@ fn process_value_with_key(ctx: &mut TomlContext, key: &str, value: &Value) {
       }
     }
     Value::InlineTable(inline) => {
+      let mut child = scope.to_vec();
+      child.push(key);
       for (k, v) in inline.iter() {
-        process_value_with_key(ctx, k, v);
+        process_value_with_key(ctx, &child, k, v);
       }
     }
     Value::Array(array) => {
+      let mut child = scope.to_vec();
+      child.push(key);
       for v in array.iter() {
-        process_standalone_value(ctx, v);
+        process_standalone_value(ctx, &child, v);
       }
     }
     _ => {}
   }
 }
 
-fn process_standalone_value(ctx: &mut TomlContext, value: &Value) {
+fn process_standalone_value(
+  ctx: &mut TomlContext,
+  scope: &[&str],
+  value: &Value,
+) {
   match value {
     Value::String(s) => {
       let s = s.value();
@@ -103,12 +130,12 @@ fn process_standalone_value(ctx: &mut TomlContext, value: &Value) {
     }
     Value::InlineTable(inline) => {
       for (k, v) in inline.iter() {
-        process_value_with_key(ctx, k, v);
+        process_value_with_key(ctx, scope, k, v);
       }
     }
     Value::Array(array) => {
       for v in array.iter() {
-        process_standalone_value(ctx, v);
+        process_standalone_value(ctx, scope, v);
       }
     }
     _ => {}

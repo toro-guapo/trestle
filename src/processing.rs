@@ -17,7 +17,7 @@ use std::sync::Arc;
 use crate::caching::{self, Cache};
 #[cfg(feature = "services")]
 use crate::scanning::{SERVICE_KEYWORDS, Service};
-#[cfg(feature = "git-history")]
+#[cfg(any(feature = "git-history", feature = "validation"))]
 use std::collections::HashMap;
 
 #[cfg(feature = "git-history")]
@@ -54,6 +54,8 @@ pub struct RunContext {
   pub scanned_file_count: AtomicUsize,
   pub git_root: Option<PathBuf>,
   pub buffers_diagnostics: bool,
+  #[cfg(feature = "validation")]
+  pub validator: Option<Arc<dyn crate::validation::SecretValidator>>,
 }
 
 impl RunContext {
@@ -70,6 +72,12 @@ thread_local! {
 
   static FILE_DIAGNOSTICS: RefCell<Vec<AnnotatedDiagnostic>> =
     const { RefCell::new(Vec::new()) };
+}
+
+#[cfg(feature = "validation")]
+thread_local! {
+  static FILE_SECRETS: RefCell<HashMap<crate::fingerprint::Fingerprint, String>> =
+    RefCell::new(HashMap::new());
 }
 
 #[cfg(feature = "git-history")]
@@ -146,22 +154,59 @@ fn take_matching_history(
 
 impl RunContext {
   pub fn send_diagnostic(&self, diagnostic: Diagnostic) {
+    self.send_annotated(self.annotate(diagnostic));
+  }
+
+  fn annotate(&self, diagnostic: Diagnostic) -> AnnotatedDiagnostic {
     #[cfg(feature = "git-history")]
-    let annotated = AnnotatedDiagnostic {
-      diagnostic,
-      history: CURRENT_HISTORY.with(|c| c.borrow().clone()),
-    };
+    {
+      AnnotatedDiagnostic {
+        diagnostic,
+        history: CURRENT_HISTORY.with(|c| c.borrow().clone()),
+        #[cfg(feature = "validation")]
+        validation: None,
+      }
+    }
     #[cfg(not(feature = "git-history"))]
-    let annotated = AnnotatedDiagnostic::bare(diagnostic);
-    self.send_annotated(annotated);
+    {
+      AnnotatedDiagnostic::bare(diagnostic)
+    }
   }
 
   pub fn send_annotated(&self, annotated: AnnotatedDiagnostic) {
-    if self.is_fingerprint_skipped(&annotated) {
+    if !self.accept(&annotated) {
       return;
     }
 
+    self.deliver(annotated);
+  }
+
+  #[cfg(feature = "validation")]
+  fn validation_secret_for(
+    &self,
+    diagnostic: &AnnotatedDiagnostic,
+  ) -> Option<String> {
+    let validator = self.validator.as_ref()?;
+    let value_class = diagnostic.diagnostic.value_class()?;
+
+    if !validator.handles(value_class) {
+      return None;
+    }
+
+    FILE_SECRETS
+      .with(|secrets| secrets.borrow().get(diagnostic.fingerprint()).cloned())
+  }
+
+  fn accept(&self, annotated: &AnnotatedDiagnostic) -> bool {
+    if self.is_fingerprint_skipped(annotated) {
+      return false;
+    }
+
     HAD_FINDINGS.with(|c| c.set(true));
+    true
+  }
+
+  fn deliver(&self, annotated: AnnotatedDiagnostic) {
     if self.buffers_diagnostics {
       FILE_DIAGNOSTICS.with(|buf| buf.borrow_mut().push(annotated));
     } else {
@@ -194,10 +239,23 @@ impl RunContext {
     }
 
     for (i, diagnostic) in diagnostics.into_iter().enumerate() {
-      if keep[i] {
-        self.diagnostic_sender.send(diagnostic).ok();
+      if !keep[i] {
+        continue;
       }
+
+      #[cfg(feature = "validation")]
+      if let Some(secret) = self.validation_secret_for(&diagnostic)
+        && let Some(validator) = &self.validator
+      {
+        validator.submit(diagnostic, &secret);
+        continue;
+      }
+
+      self.diagnostic_sender.send(diagnostic).ok();
     }
+
+    #[cfg(feature = "validation")]
+    FILE_SECRETS.with(|secrets| secrets.borrow_mut().clear());
   }
 }
 
@@ -205,6 +263,13 @@ fn supersedes(
   outer: &AnnotatedDiagnostic,
   inner: &AnnotatedDiagnostic,
 ) -> bool {
+  if is_content_scan(inner)
+    && !is_content_scan(outer)
+    && spans_overlap(outer, inner)
+  {
+    return true;
+  }
+
   let Some(outer_file_span) =
     outer.source_span().and_then(|s| s.file_span.as_ref())
   else {
@@ -223,6 +288,28 @@ fn supersedes(
   }
 
   severity_rank(outer.severity()) > severity_rank(inner.severity())
+}
+
+fn is_content_scan(annotated: &AnnotatedDiagnostic) -> bool {
+  matches!(
+    annotated.diagnostic,
+    Diagnostic::SecretValue {
+      from_content_scan: true,
+      ..
+    }
+  )
+}
+
+fn spans_overlap(a: &AnnotatedDiagnostic, b: &AnnotatedDiagnostic) -> bool {
+  let (Some(a_span), Some(b_span)) = (
+    a.source_span().and_then(|s| s.file_span.as_ref()),
+    b.source_span().and_then(|s| s.file_span.as_ref()),
+  ) else {
+    return false;
+  };
+
+  position_le(&a_span.start, &b_span.end)
+    && position_le(&b_span.start, &a_span.end)
 }
 
 fn position_le(a: &SourcePosition, b: &SourcePosition) -> bool {
@@ -261,10 +348,10 @@ impl<'a> SourceContext<'a> {
   }
 
   pub fn emit_diagnostic(&self, diagnostic: Diagnostic) {
-    if let Some(line) = diagnostic_line(&diagnostic) {
-      if self.directives().skip_covering(line).is_some() {
-        return;
-      }
+    if let Some(line) = diagnostic_line(&diagnostic)
+      && self.directives().skip_covering(line).is_some()
+    {
+      return;
     }
     self.run.send_diagnostic(diagnostic);
   }
@@ -328,6 +415,9 @@ impl ScanContext {
     &self,
     diagnostic_sender: Sender<AnnotatedDiagnostic>,
     #[cfg(feature = "git-history")] history_map: Option<HistoryMap>,
+    #[cfg(feature = "validation")] validator: Option<
+      Arc<dyn crate::validation::SecretValidator>,
+    >,
   ) -> RunContext {
     RunContext {
       abs_dir: self.abs_dir.clone(),
@@ -342,12 +432,17 @@ impl ScanContext {
       scanned_file_count: AtomicUsize::new(0),
       git_root: self.git_root.clone(),
       buffers_diagnostics: true,
+      #[cfg(feature = "validation")]
+      validator,
     }
   }
 
   pub fn make_run_context_no_cache(
     &self,
     diagnostic_sender: Sender<AnnotatedDiagnostic>,
+    #[cfg(feature = "validation")] validator: Option<
+      Arc<dyn crate::validation::SecretValidator>,
+    >,
   ) -> RunContext {
     RunContext {
       abs_dir: self.abs_dir.clone(),
@@ -362,6 +457,8 @@ impl ScanContext {
       scanned_file_count: AtomicUsize::new(0),
       git_root: self.git_root.clone(),
       buffers_diagnostics: true,
+      #[cfg(feature = "validation")]
+      validator,
     }
   }
 
@@ -432,7 +529,7 @@ pub fn process_dir(run_context: &RunContext, abs_dir: &PathBuf) {
 
 fn is_git_excluded(
   run_context: &RunContext,
-  path: &PathBuf,
+  path: &Path,
   is_dir: bool,
 ) -> bool {
   GIT_HANDLE.with(|cell| {
@@ -454,7 +551,7 @@ fn is_git_excluded(
 
 fn matching_skip_glob<'a>(
   options: &'a Options,
-  path: &PathBuf,
+  path: &Path,
 ) -> Option<&'a ScopedGlob> {
   for scoped in &options.skip_glob {
     let Ok(rel) = path.strip_prefix(&scoped.anchor) else {
@@ -621,7 +718,7 @@ fn is_auto_excluded_dir(name: &str) -> bool {
 fn skipped_dir_reason(
   run_context: &RunContext,
   options: &Options,
-  path: &PathBuf,
+  path: &Path,
   check_git: bool,
 ) -> Option<SkipReason> {
   let name = path.file_name().and_then(|n| n.to_str())?;
@@ -732,7 +829,7 @@ fn is_path_skipped_inner(
 fn skipped_file_reason(
   run_context: &RunContext,
   options: &Options,
-  path: &PathBuf,
+  path: &Path,
   check_git: bool,
 ) -> Option<SkipReason> {
   let name = path.file_name().and_then(|n| n.to_str())?;
@@ -781,6 +878,14 @@ pub fn process_files_with_surrounding_context(
     record_surrounding_stack_metadata(run_context, path);
     process_explicit_file(run_context, path);
   }
+}
+
+pub fn process_dir_with_surrounding_context(
+  run_context: &RunContext,
+  abs_dir: &PathBuf,
+) {
+  record_surrounding_stack_metadata(run_context, abs_dir);
+  process_dir(run_context, abs_dir);
 }
 
 fn process_explicit_file(run_context: &RunContext, path: &PathBuf) {
@@ -850,7 +955,12 @@ pub fn process_text(run_context: &RunContext, path: &PathBuf, text: &str) {
     directives: OnceCell::new(),
   };
 
+  #[cfg(feature = "signatures")]
+  send_signature_diagnostics(run_context, path, text);
+
   if languages::parse(&context).is_none() {
+    #[cfg(feature = "rails-master-key")]
+    send_rails_master_key_diagnostics(run_context, path, text);
     #[cfg(feature = "pem")]
     send_pem_diagnostics(run_context, path, text);
     #[cfg(feature = "putty")]
@@ -859,15 +969,15 @@ pub fn process_text(run_context: &RunContext, path: &PathBuf, text: &str) {
 }
 
 #[cfg(feature = "services")]
-fn services_from_path(path: &PathBuf) -> Vec<&'static Service> {
+fn services_from_path(path: &Path) -> Vec<&'static Service> {
   let path_str = path.to_string_lossy().to_ascii_lowercase();
   let mut found = Vec::new();
 
   for keyword in SERVICE_KEYWORDS {
-    if path_str.contains(keyword) {
-      if let Some(service) = Service::by_keyword(keyword) {
-        found.push(service);
-      }
+    if path_str.contains(keyword)
+      && let Some(service) = Service::by_keyword(keyword)
+    {
+      found.push(service);
     }
   }
 
@@ -893,13 +1003,13 @@ fn process_file_inner(run_context: &RunContext, path: &PathBuf) {
   let mtime = fs::metadata(path).and_then(|m| m.modified()).ok();
 
   #[cfg(feature = "cache")]
-  if let (Some(cache), Some(mtime)) = (&run_context.cache, &mtime) {
-    if matches!(cache.check(path, *mtime), crate::caching::CacheCheck::Clean) {
-      run_context
-        .scanned_file_count
-        .fetch_add(1, Ordering::Relaxed);
-      return;
-    }
+  if let (Some(cache), Some(mtime)) = (&run_context.cache, &mtime)
+    && matches!(cache.check(path, *mtime), crate::caching::CacheCheck::Clean)
+  {
+    run_context
+      .scanned_file_count
+      .fetch_add(1, Ordering::Relaxed);
+    return;
   }
 
   let Ok(body) = fs::read_to_string(path) else {
@@ -950,6 +1060,15 @@ pub fn process_bytes(
   HAD_FINDINGS.with(|c| c.set(false));
   FILE_DIAGNOSTICS.with(|buf| buf.borrow_mut().clear());
 
+  #[cfg(feature = "rails-master-key")]
+  if let Some(text) = text
+    && crate::secrets::text_secret::rails::is_credentials_key_file(path)
+  {
+    process_text(run_context, path, text);
+    run_context.flush_file_diagnostics();
+    return;
+  }
+
   match first_byte {
     #[cfg(feature = "binary-gpg")]
     0x94 | 0x95 | 0x96 | 0x9C | 0x9D | 0x9E | 0xC5 | 0xC7 => {
@@ -958,7 +1077,7 @@ pub fn process_bytes(
           secret: BinarySecret::Gpg(secret),
           severity: Severity::Critical,
           file_type: Some(FileType::Gpg),
-          file_abs_path: path.clone(),
+          file_abs_path: path.to_path_buf(),
           fingerprint: binary_fingerprint(bytes),
         });
       }
@@ -970,7 +1089,7 @@ pub fn process_bytes(
           secret: BinarySecret::Der(secret),
           severity: Severity::Critical,
           file_type: Some(FileType::Der),
-          file_abs_path: path.clone(),
+          file_abs_path: path.to_path_buf(),
           fingerprint: binary_fingerprint(bytes),
         });
       }
@@ -982,7 +1101,7 @@ pub fn process_bytes(
           secret: BinarySecret::KeePass(secret),
           severity: Severity::Critical,
           file_type: Some(FileType::KeePass),
-          file_abs_path: path.clone(),
+          file_abs_path: path.to_path_buf(),
           fingerprint: binary_fingerprint(bytes),
         });
       }
@@ -994,7 +1113,7 @@ pub fn process_bytes(
           secret: BinarySecret::Jceks(secret),
           severity: Severity::Critical,
           file_type: Some(FileType::Jceks),
-          file_abs_path: path.clone(),
+          file_abs_path: path.to_path_buf(),
           fingerprint: binary_fingerprint(bytes),
         });
       }
@@ -1006,7 +1125,7 @@ pub fn process_bytes(
           secret: BinarySecret::Jks(secret),
           severity: Severity::Critical,
           file_type: Some(FileType::Jks),
-          file_abs_path: path.clone(),
+          file_abs_path: path.to_path_buf(),
           fingerprint: binary_fingerprint(bytes),
         });
       }
@@ -1021,12 +1140,87 @@ pub fn process_bytes(
   run_context.flush_file_diagnostics();
 }
 
-#[cfg(feature = "pem")]
-fn send_pem_diagnostics(
+#[cfg(feature = "signatures")]
+fn send_signature_diagnostics(
   run_context: &RunContext,
-  path: &PathBuf,
+  path: &Path,
   content: &str,
 ) {
+  use crate::{
+    diagnostic::secret_value_severity,
+    scanning::signatures,
+    secrets::values::{
+      classify::classify_matched_signature, normalize::normalize_value,
+    },
+    source::{self, SourceFileSpan, SourceSpan},
+  };
+
+  for (range, sig) in signatures::scan_all(content) {
+    let Some(matched) = content.get(range.start..range.end) else {
+      continue;
+    };
+
+    let value = normalize_value(&matched);
+
+    let Some(value_class) = classify_matched_signature(sig, &value) else {
+      continue;
+    };
+
+    let Some(severity) = secret_value_severity(&value_class) else {
+      continue;
+    };
+
+    let start = source::offset_to_position(content, range.start);
+    let end = source::offset_to_position(content, range.end);
+
+    let diagnostic = Diagnostic::SecretValue {
+      source_span: SourceFileSpan {
+        file_abs_path: path.to_path_buf(),
+        file_span: Some(SourceSpan { start, end }),
+      },
+      value_class,
+      severity,
+      file_type: None,
+      fingerprint: value_fingerprint(matched.as_bytes()),
+      from_content_scan: true,
+    };
+
+    #[cfg(feature = "validation")]
+    if run_context.validator.is_some() {
+      FILE_SECRETS.with(|secrets| {
+        secrets
+          .borrow_mut()
+          .insert(diagnostic.fingerprint().clone(), matched.to_owned());
+      });
+    }
+
+    run_context.send_diagnostic(diagnostic);
+  }
+}
+
+#[cfg(feature = "rails-master-key")]
+fn send_rails_master_key_diagnostics(
+  run_context: &RunContext,
+  path: &Path,
+  content: &str,
+) {
+  use crate::secrets::text_secret::{TextSecret, rails};
+
+  if !rails::is_credentials_key_file(path) || !rails::is_key_material(content) {
+    return;
+  }
+
+  run_context.send_diagnostic(Diagnostic::TextSecret {
+    secret: TextSecret::RailsMasterKey,
+    severity: Severity::Critical,
+    file_type: Some(FileType::RailsMasterKey),
+    file_abs_path: path.to_path_buf(),
+    fingerprint: text_fingerprint(content.as_bytes()),
+  });
+}
+
+#[cfg(feature = "pem")]
+fn send_pem_diagnostics(run_context: &RunContext, path: &Path, content: &str) {
   use crate::{
     secrets::{
       pem,
@@ -1047,7 +1241,7 @@ fn send_pem_diagnostics(
       secret: TextSecret::Pem(keys),
       severity: Severity::Critical,
       file_type: Some(FileType::Pem),
-      file_abs_path: path.clone(),
+      file_abs_path: path.to_path_buf(),
       fingerprint: text_fingerprint(content.as_bytes()),
     });
     return;
@@ -1058,7 +1252,7 @@ fn send_pem_diagnostics(
     let end = source::offset_to_position(content, finding.byte_range.end);
     run_context.send_diagnostic(Diagnostic::SecretValue {
       source_span: SourceFileSpan {
-        file_abs_path: path.clone(),
+        file_abs_path: path.to_path_buf(),
         file_span: Some(SourceSpan { start, end }),
       },
       value_class: Secret(PrivateKey(finding.key_type)),
@@ -1070,6 +1264,7 @@ fn send_pem_diagnostics(
           .unwrap_or("")
           .as_bytes(),
       ),
+      from_content_scan: false,
     });
   }
 }
@@ -1077,7 +1272,7 @@ fn send_pem_diagnostics(
 #[cfg(feature = "putty")]
 fn send_putty_diagnostics(
   run_context: &RunContext,
-  path: &PathBuf,
+  path: &Path,
   content: &str,
 ) {
   use crate::{
@@ -1100,7 +1295,7 @@ fn send_putty_diagnostics(
       secret: TextSecret::Putty(keys),
       severity: Severity::Critical,
       file_type: Some(FileType::Putty),
-      file_abs_path: path.clone(),
+      file_abs_path: path.to_path_buf(),
       fingerprint: text_fingerprint(content.as_bytes()),
     });
     return;
@@ -1111,7 +1306,7 @@ fn send_putty_diagnostics(
     let end = source::offset_to_position(content, finding.byte_range.end);
     run_context.send_diagnostic(Diagnostic::SecretValue {
       source_span: SourceFileSpan {
-        file_abs_path: path.clone(),
+        file_abs_path: path.to_path_buf(),
         file_span: Some(SourceSpan { start, end }),
       },
       value_class: Secret(PuttyKey(finding.key_type)),
@@ -1123,6 +1318,7 @@ fn send_putty_diagnostics(
           .unwrap_or("")
           .as_bytes(),
       ),
+      from_content_scan: false,
     });
   }
 }

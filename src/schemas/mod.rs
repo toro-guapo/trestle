@@ -235,11 +235,15 @@ fn parse_yaml_schema(
 
 #[cfg(feature = "lang-shell")]
 pub fn parse_shell_value(info: &SchemaValue) {
+  parse_shell_value_with(info, info.value);
+}
+
+pub fn parse_shell_value_with(info: &SchemaValue, body: &str) {
   let context = SourceContext {
     run: info.run,
     file_abs_path: info.file_abs_path,
     file_extension: None,
-    body: Some(info.value),
+    body: Some(body),
     file_type: Some(FileType::Shell),
     parent_line: info.parent_line,
     parent_col: info.parent_col,

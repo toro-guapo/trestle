@@ -55,11 +55,9 @@ fn emit_xml(
   suite.push_attribute(("errors", "0"));
   xml.write_event(Event::Start(suite)).ok();
 
-  if show_summary {
-    if let Some(stats) = stats {
-      let formatted = build_summary(stats, summary);
-      write_properties(&mut xml, &formatted);
-    }
+  if show_summary && let Some(stats) = stats {
+    let formatted = build_summary(stats, summary);
+    write_properties(&mut xml, &formatted);
   }
 
   for diagnostic in diagnostics {

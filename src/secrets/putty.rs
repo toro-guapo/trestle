@@ -4,10 +4,10 @@ use regex::Regex;
 
 static TOKEN_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
   Regex::new(concat!(
-    r"PuTTY-User-Key-File-([23]):[ \t]*([\w-]+)[ \t]*\n",
+    r"PuTTY-User-Key-File-([23]):[ \t]*([\w-]+)[ \t]*\r?\n",
     r"(?:.*\n)*?",
-    r"Private-Lines:[ \t]*[0-9]+[ \t]*\n",
-    r"[A-Za-z0-9+/]{20}[A-Za-z0-9+/=]*\n",
+    r"Private-Lines:[ \t]*[0-9]+[ \t]*\r?\n",
+    r"[A-Za-z0-9+/]{20}[A-Za-z0-9+/=]*\r?\n",
     r"(?:.*\n)*?",
     r"Private-MAC:[ \t]*[a-fA-F0-9]+",
   ))

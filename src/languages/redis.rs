@@ -60,7 +60,7 @@ fn process_line(
         context,
         source,
         &directive_text,
-        &value.text,
+        value.text,
         value.start,
         value.end,
         AssignmentType::Directive,

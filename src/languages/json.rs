@@ -6,8 +6,8 @@ use jsonc_parser::{
 
 use crate::{
   diagnostic::{
-    AssignmentType, SourceFileSpan, SourceSpan, check_assignment, check_value,
-    offset_to_position,
+    AssignmentType, SourceFileSpan, SourceSpan, check_assignment_in_scope,
+    check_value, offset_to_position,
   },
   processing::SourceContext,
   schemas::SchemaValue,
@@ -126,7 +126,8 @@ fn process_object(context: &mut JsonContext, path: &[&str], object: &Object) {
 
       if !handled {
         let key = key.to_owned();
-        if let Some(d) = check_assignment(
+        if let Some(d) = check_assignment_in_scope(
+          path,
           &normalize_name(&key),
           &normalize_value(&value),
           AssignmentType::Element,

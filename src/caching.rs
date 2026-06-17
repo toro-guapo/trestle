@@ -49,10 +49,10 @@ pub fn open(cache_path: &Path) -> Result<Cache, String> {
   let cache_dir = cache_path.join(CACHE_DIR_NAME);
   let db_path = cache_dir.join(DB_FILE_NAME);
 
-  if db_path.exists() {
-    if let Err(()) | Ok(false) = check_version(&db_path) {
-      let _ = std::fs::remove_dir_all(&cache_dir);
-    }
+  if db_path.exists()
+    && let Err(()) | Ok(false) = check_version(&db_path)
+  {
+    let _ = std::fs::remove_dir_all(&cache_dir);
   }
 
   if !cache_dir.exists() {
@@ -113,14 +113,14 @@ impl Cache {
   fn with_conn<T>(&self, f: impl FnOnce(&Connection) -> T) -> Option<T> {
     CACHE_CONN.with(|cell| {
       let mut cached_conn = cell.borrow_mut();
-      if cached_conn.is_none() {
-        if let Ok(conn) = Connection::open(&self.db_path) {
-          let _ = conn.execute("PRAGMA journal_mode=WAL", []);
-          *cached_conn = Some(CacheConn {
-            conn,
-            buf: Vec::new(),
-          });
-        }
+      if cached_conn.is_none()
+        && let Ok(conn) = Connection::open(&self.db_path)
+      {
+        let _ = conn.execute("PRAGMA journal_mode=WAL", []);
+        *cached_conn = Some(CacheConn {
+          conn,
+          buf: Vec::new(),
+        });
       }
       cached_conn.as_ref().map(|cache_conn| f(&cache_conn.conn))
     })
@@ -174,14 +174,14 @@ impl Cache {
 
     CACHE_CONN.with(|cell| {
       let mut cached_conn = cell.borrow_mut();
-      if cached_conn.is_none() {
-        if let Ok(conn) = Connection::open(&self.db_path) {
-          let _ = conn.execute("PRAGMA journal_mode=WAL", []);
-          *cached_conn = Some(CacheConn {
-            conn,
-            buf: Vec::new(),
-          });
-        }
+      if cached_conn.is_none()
+        && let Ok(conn) = Connection::open(&self.db_path)
+      {
+        let _ = conn.execute("PRAGMA journal_mode=WAL", []);
+        *cached_conn = Some(CacheConn {
+          conn,
+          buf: Vec::new(),
+        });
       }
       if let Some(cached_conn) = cached_conn.as_mut() {
         cached_conn.buf.push((hash, sec, nano, status));

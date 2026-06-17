@@ -1,6 +1,8 @@
 use crate::diagnostic::{AnnotatedDiagnostic, Severity};
 use crate::formatting::format_count;
 use crate::output::{ScanSummary, WriteContext, build_summary, count};
+#[cfg(feature = "validation")]
+use crate::validation::ValidationStatus;
 
 const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_RED: &str = "\x1b[31m";
@@ -62,6 +64,15 @@ fn split_line_column_suffix(location: &str) -> Option<(&str, &str)> {
   Some((&location[..suffix_start], &location[suffix_start..]))
 }
 
+#[cfg(feature = "validation")]
+fn validation_label(status: ValidationStatus) -> &'static str {
+  match status {
+    ValidationStatus::Live => "(active)",
+    ValidationStatus::Inactive => "(inactive)",
+    ValidationStatus::Unknown => "(could not verify)",
+  }
+}
+
 fn render_diagnostic(
   diagnostic: &AnnotatedDiagnostic,
   use_color: bool,
@@ -108,6 +119,21 @@ fn render_diagnostic(
     None => line,
   };
 
+  #[cfg(feature = "validation")]
+  let line = match diagnostic.validation() {
+    Some(status) if use_color => {
+      let label = validation_label(status);
+      match status {
+        ValidationStatus::Live => {
+          format!("{line} {ANSI_RED}{label}{ANSI_RESET}")
+        }
+        _ => format!("{line} {ANSI_DIM}{label}{ANSI_RESET}"),
+      }
+    }
+    Some(status) => format!("{line} {}", validation_label(status)),
+    None => line,
+  };
+
   let fingerprint = diagnostic.fingerprint();
   if use_color {
     format!("{line} {ANSI_DIM}[{fingerprint}]{ANSI_RESET}")
@@ -134,12 +160,12 @@ pub fn write(ctx: WriteContext<'_>) -> ScanSummary {
     writeln!(output_writer, "{rendered}").ok();
   }
 
-  if options.show_summary {
-    if let Ok(stats) = scan_stats_receiver.recv() {
-      let formatted = build_summary(stats, summary);
-      let message = summary_message(&formatted, &summary, use_color);
-      writeln!(output_writer, "{message}").ok();
-    }
+  if options.show_summary
+    && let Ok(stats) = scan_stats_receiver.recv()
+  {
+    let formatted = build_summary(stats, summary);
+    let message = summary_message(&formatted, &summary, use_color);
+    writeln!(output_writer, "{message}").ok();
   }
 
   summary

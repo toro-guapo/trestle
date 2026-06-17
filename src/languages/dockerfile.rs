@@ -73,6 +73,9 @@ fn process_instruction(
           || compute_span(ctx, var.value.span),
         ) {
           ctx.source_context.emit_diagnostic(d);
+        } else {
+          // The value is not a hardcoded secret, but a secret-named ENV fed by
+          // a build argument (`ENV API_KEY=$ARG`) still bakes it into the image.
         }
       }
     }
@@ -103,6 +106,7 @@ fn process_instruction(
         || compute_span(ctx, value_spanned.span),
       ) {
         ctx.source_context.emit_diagnostic(d);
+      } else {
       }
     }
     Instruction::Run(run) => {

@@ -81,14 +81,18 @@ pub fn parse(context: &SourceContext) -> bool {
 
 fn process_node(ctx: &mut DartContext, node: Node, source: &[u8]) {
   match node.kind() {
-    "static_final_declaration" => process_static_final(ctx, node, source),
+    "static_final_declaration" => {
+      process_static_final(ctx, node, source);
+    }
     "initialized_identifier" => {
       process_initialized_identifier(ctx, node, source);
     }
     "initialized_variable_definition" => {
       process_initialized_variable(ctx, node, source);
     }
-    "assignment_expression" => process_assignment(ctx, node, source),
+    "assignment_expression" => {
+      process_assignment(ctx, node, source);
+    }
     "pair" => process_pair(ctx, node, source),
     "named_argument" => process_named_argument(ctx, node, source),
     "function_signature" | "constructor_signature" => {
@@ -456,6 +460,7 @@ fn process_expression_statement(
 ) {
   let mut callee: Option<String> = None;
   let mut arguments_node: Option<Node> = None;
+  let mut is_method_call = false;
 
   let mut cursor = node.walk();
   for child in node.children(&mut cursor) {
@@ -476,6 +481,7 @@ fn process_expression_statement(
               }
             }
             "unconditional_assignable_selector" => {
+              is_method_call = true;
               let mut us_cursor = sel_child.walk();
               for us_child in sel_child.children(&mut us_cursor) {
                 if us_child.kind() == "identifier" {
@@ -499,6 +505,10 @@ fn process_expression_statement(
 
   let positional = extract_positional_args(args_node, source);
   if positional.is_empty() {
+    return;
+  }
+
+  if is_method_call {
     return;
   }
 
@@ -753,6 +763,14 @@ fn check_value_node(
     }
     // x ?? "fallback" - each operand is its own value expression.
     "if_null_expression" => {
+      let mut cursor = value_node.walk();
+      for child in value_node.children(&mut cursor) {
+        if child.is_named() {
+          check_value_node(ctx, name, child, assignment_type, child, source);
+        }
+      }
+    }
+    "list_literal" | "set_or_map_literal" => {
       let mut cursor = value_node.walk();
       for child in value_node.children(&mut cursor) {
         if child.is_named() {

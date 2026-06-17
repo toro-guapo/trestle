@@ -14,5 +14,9 @@
   {
     "id": "text-secret",
     "description": "Secret found in a text file."
+  },
+  {
+    "id": "exposed-secret",
+    "description": "Secret written to program output, where it may be exposed to users or other systems."
   }
 ]

@@ -15,8 +15,8 @@ use oxc_syntax::operator::{
 use crate::{
   analysis::{Analyzer, CallFrame, FunctionSignature},
   diagnostic::{
-    AssignmentType, SourceFileSpan, SourceSpan, check_assignment, check_value,
-    offset_to_position,
+    AssignmentType, SourceFileSpan, check_assignment, check_header_assignment,
+    check_value, compute_file_span,
   },
   processing::SourceContext,
   secrets::{
@@ -26,9 +26,9 @@ use crate::{
 };
 
 thread_local! {
-  static ALLOCATOR: RefCell<Option<oxc_allocator::Allocator>> = RefCell::new(
+  static ALLOCATOR: RefCell<Option<oxc_allocator::Allocator>> = const { RefCell::new(
     None
-  );
+  ) };
   static ANALYZER: RefCell<Analyzer<String, oxc_span::Span>> = RefCell::new(
     Analyzer::new()
   );
@@ -54,6 +54,7 @@ impl<'a> JsContext<'a> {
 }
 
 pub fn parse(context: &SourceContext) -> bool {
+  ANALYZER.with(|a| a.borrow_mut().clear());
   parse_with_source_type(context, None)
 }
 
@@ -74,9 +75,9 @@ pub fn parse_with_source_type(
     let mut allocator = allocator.borrow_mut();
 
     let allocator = allocator
-      .get_or_insert_with(|| oxc_allocator::Allocator::with_capacity(1 * MB));
+      .get_or_insert_with(|| oxc_allocator::Allocator::with_capacity(MB));
 
-    let parser = oxc_parser::Parser::new(&mut *allocator, source, source_type)
+    let parser = oxc_parser::Parser::new(&*allocator, source, source_type)
       .with_options(oxc_parser::ParseOptions {
         allow_return_outside_function: true,
         ..Default::default()
@@ -87,7 +88,7 @@ pub fn parse_with_source_type(
       return false;
     }
 
-    ANALYZER.with(|a| a.borrow_mut().clear());
+    ANALYZER.with(|a| a.borrow_mut().clear_frames());
 
     let mut js_context = JsContext {
       source,
@@ -107,6 +108,184 @@ pub fn parse_with_source_type(
   })
 }
 
+pub fn scan_expression(context: &SourceContext) -> bool {
+  scan_expression_inner(context, false)
+}
+
+pub fn scan_client_expression(context: &SourceContext) -> bool {
+  scan_expression_inner(context, true)
+}
+
+fn scan_expression_inner(context: &SourceContext, client_sink: bool) -> bool {
+  let Some(source) = context.body else {
+    return false;
+  };
+
+  ALLOCATOR.with(|allocator| {
+    let mut allocator = allocator.borrow_mut();
+
+    let allocator = allocator
+      .get_or_insert_with(|| oxc_allocator::Allocator::with_capacity(MB));
+
+    let parser = oxc_parser::Parser::new(&*allocator, source, SourceType::ts());
+
+    let Ok(expression) = parser.parse_expression() else {
+      return false;
+    };
+
+    ANALYZER.with(|a| a.borrow_mut().clear_frames());
+
+    let mut js_context = JsContext {
+      source,
+      source_context: context,
+      emitted_value_ranges: Vec::new(),
+    };
+
+    process_value(&mut js_context, &expression);
+    process_expression(&mut js_context, &expression);
+
+    let _ = client_sink;
+
+    ANALYZER.with(|a| {
+      a.borrow().resolve_calls(|signature, arguments| {
+        resolve_arguments(&mut js_context, signature, arguments);
+      });
+    });
+
+    true
+  })
+}
+
+pub fn reset_analyzer() {
+  ANALYZER.with(|a| a.borrow_mut().clear());
+}
+
+pub fn declare_signature(name: String, parameter_names: Vec<String>) {
+  ANALYZER.with(|a| {
+    a.borrow_mut()
+      .add_signature(name, FunctionSignature { parameter_names });
+  });
+}
+
+pub fn parameter_names(params_source: &str) -> Vec<String> {
+  let wrapped = format!("({params_source}) => 0");
+
+  ALLOCATOR.with(|allocator| {
+    let mut allocator = allocator.borrow_mut();
+
+    let allocator = allocator
+      .get_or_insert_with(|| oxc_allocator::Allocator::with_capacity(MB));
+
+    let parser =
+      oxc_parser::Parser::new(&*allocator, &wrapped, SourceType::ts());
+
+    let Ok(Expression::ArrowFunctionExpression(arrow)) =
+      parser.parse_expression()
+    else {
+      return Vec::new();
+    };
+
+    identifier_param_names(&arrow.params)
+  })
+}
+
+fn identifier_param_names(params: &FormalParameters) -> Vec<String> {
+  params
+    .items
+    .iter()
+    .map(|param| match &param.pattern {
+      BindingPattern::BindingIdentifier(id) => id.name.to_string(),
+      _ => String::new(),
+    })
+    .collect()
+}
+
+pub fn collect_signatures(source: &str) -> Vec<(String, Vec<String>)> {
+  let mut signatures = Vec::new();
+
+  ALLOCATOR.with(|allocator| {
+    let mut allocator = allocator.borrow_mut();
+
+    let allocator = allocator
+      .get_or_insert_with(|| oxc_allocator::Allocator::with_capacity(MB));
+
+    let parser = oxc_parser::Parser::new(&*allocator, source, SourceType::ts())
+      .with_options(oxc_parser::ParseOptions {
+        allow_return_outside_function: true,
+        ..Default::default()
+      });
+
+    let result = parser.parse();
+    if result.errors.is_empty() {
+      for statement in &result.program.body {
+        collect_signature(statement, &mut signatures);
+      }
+    }
+  });
+
+  signatures
+}
+
+fn collect_signature(
+  statement: &Statement,
+  signatures: &mut Vec<(String, Vec<String>)>,
+) {
+  match statement {
+    Statement::FunctionDeclaration(function) => {
+      push_function_signature(function, signatures);
+    }
+    Statement::VariableDeclaration(declaration) => {
+      push_variable_signatures(declaration, signatures);
+    }
+    Statement::ExportNamedDeclaration(export) => match &export.declaration {
+      Some(Declaration::FunctionDeclaration(function)) => {
+        push_function_signature(function, signatures);
+      }
+      Some(Declaration::VariableDeclaration(declaration)) => {
+        push_variable_signatures(declaration, signatures);
+      }
+      _ => {}
+    },
+    _ => {}
+  }
+}
+
+fn push_function_signature(
+  function: &Function,
+  signatures: &mut Vec<(String, Vec<String>)>,
+) {
+  if let Some(id) = &function.id {
+    signatures.push((
+      id.name.to_string(),
+      identifier_param_names(&function.params),
+    ));
+  }
+}
+
+fn push_variable_signatures(
+  declaration: &VariableDeclaration,
+  signatures: &mut Vec<(String, Vec<String>)>,
+) {
+  for declarator in &declaration.declarations {
+    let BindingPattern::BindingIdentifier(id) = &declarator.id else {
+      continue;
+    };
+    match &declarator.init {
+      Some(Expression::ArrowFunctionExpression(arrow)) => {
+        signatures
+          .push((id.name.to_string(), identifier_param_names(&arrow.params)));
+      }
+      Some(Expression::FunctionExpression(function)) => {
+        signatures.push((
+          id.name.to_string(),
+          identifier_param_names(&function.params),
+        ));
+      }
+      _ => {}
+    }
+  }
+}
+
 fn process_statements(context: &mut JsContext<'_>, statements: &[Statement]) {
   for statement in statements {
     process_statement(context, statement);
@@ -114,7 +293,6 @@ fn process_statements(context: &mut JsContext<'_>, statements: &[Statement]) {
 }
 
 fn process_statement(context: &mut JsContext<'_>, statement: &Statement) {
-
   match statement {
     Statement::VariableDeclaration(decl) => {
       process_variable_declaration(context, decl);
@@ -243,13 +421,11 @@ fn process_statement(context: &mut JsContext<'_>, statement: &Statement) {
       if let Some(body) = &decl.body {
         match body {
           oxc_ast::ast::TSModuleDeclarationBody::TSModuleDeclaration(inner) => {
-            if let Some(inner_body) = &inner.body {
-              if let oxc_ast::ast::TSModuleDeclarationBody::TSModuleBlock(
-                block,
-              ) = inner_body
-              {
-                process_statements(context, &block.body);
-              }
+            if let Some(inner_body) = &inner.body
+              && let oxc_ast::ast::TSModuleDeclarationBody::TSModuleBlock(block) =
+                inner_body
+            {
+              process_statements(context, &block.body);
             }
           }
           oxc_ast::ast::TSModuleDeclarationBody::TSModuleBlock(block) => {
@@ -313,7 +489,11 @@ fn process_variable_declaration(
         );
       }
       BindingPattern::ObjectPattern(_) | BindingPattern::ArrayPattern(_) => {
-        process_binding_pattern_defaults(context, &declarator.id);
+        process_binding_pattern_defaults(
+          context,
+          &declarator.id,
+          AssignmentType::Variable,
+        );
         process_expression(context, init);
       }
       _ => {
@@ -326,11 +506,16 @@ fn process_variable_declaration(
 fn process_binding_pattern_defaults(
   context: &mut JsContext<'_>,
   pattern: &BindingPattern,
+  assignment_type: AssignmentType,
 ) {
   match pattern {
     BindingPattern::AssignmentPattern(assign) => {
       let BindingPattern::BindingIdentifier(id) = &assign.left else {
-        process_binding_pattern_defaults(context, &assign.left);
+        process_binding_pattern_defaults(
+          context,
+          &assign.left,
+          assignment_type,
+        );
         return;
       };
       let name: &str = &id.name;
@@ -339,17 +524,17 @@ fn process_binding_pattern_defaults(
         name,
         &assign.right,
         assign.right.span(),
-        AssignmentType::Variable,
+        assignment_type,
       );
     }
     BindingPattern::ObjectPattern(obj) => {
       for prop in &obj.properties {
-        process_binding_pattern_defaults(context, &prop.value);
+        process_binding_pattern_defaults(context, &prop.value, assignment_type);
       }
     }
     BindingPattern::ArrayPattern(arr) => {
       for element in arr.elements.iter().flatten() {
-        process_binding_pattern_defaults(context, element);
+        process_binding_pattern_defaults(context, element, assignment_type);
       }
     }
     _ => {}
@@ -357,7 +542,6 @@ fn process_binding_pattern_defaults(
 }
 
 fn process_expression(context: &mut JsContext<'_>, expression: &Expression) {
-
   process_value(context, expression);
 
   match expression {
@@ -386,6 +570,17 @@ fn process_expression(context: &mut JsContext<'_>, expression: &Expression) {
           assign.right.span(),
           AssignmentType::Property,
         );
+      } else if let AssignmentTarget::ComputedMemberExpression(member) =
+        &assign.left
+        && let Some(key) = string_literal(&member.expression)
+      {
+        check_expression_value(
+          context,
+          &key,
+          &assign.right,
+          assign.right.span(),
+          AssignmentType::Element,
+        );
       } else {
         process_expression(context, &assign.right);
       }
@@ -398,10 +593,11 @@ fn process_expression(context: &mut JsContext<'_>, expression: &Expression) {
     }
 
     Expression::CallExpression(call) => {
-      if let Some(callee_name) = callee_name(&call.callee) {
+      if let Some(callee_name) = free_function_callee(&call.callee) {
         process_call_arguments(context, &callee_name, &call.arguments, true);
       }
 
+      process_header_setter_call(context, call);
       process_expression(context, &call.callee);
 
       for arg in &call.arguments {
@@ -409,10 +605,27 @@ fn process_expression(context: &mut JsContext<'_>, expression: &Expression) {
           process_expression(context, expr);
         }
       }
+
+      if auth_call_name(&call.callee)
+        .as_deref()
+        .is_some_and(is_auth_call)
+      {
+        for arg in &call.arguments {
+          if let Some(expr) = arg.as_expression() {
+            check_expression_value(
+              context,
+              "password",
+              expr,
+              expr.span(),
+              AssignmentType::Argument,
+            );
+          }
+        }
+      }
     }
 
     Expression::NewExpression(new_expr) => {
-      if let Some(callee_name) = callee_name(&new_expr.callee) {
+      if let Some(callee_name) = constructed_type_name(&new_expr.callee) {
         process_call_arguments(
           context,
           &callee_name,
@@ -462,10 +675,19 @@ fn process_expression(context: &mut JsContext<'_>, expression: &Expression) {
         if prop.shorthand {
           continue;
         }
+
         let Some(key_name) = property_key_name(&prop.key) else {
           process_expression(context, &prop.value);
           continue;
         };
+
+        if key_name == "headers"
+          && let Expression::ObjectExpression(headers) = &prop.value
+        {
+          process_header_object(context, headers);
+          continue;
+        }
+
         check_expression_value(
           context,
           &key_name,
@@ -705,20 +927,31 @@ fn process_function(context: &mut JsContext<'_>, function: &Function) {
 
 fn process_parameters(context: &mut JsContext<'_>, params: &FormalParameters) {
   for param in &params.items {
-    let Some(init) = &param.initializer else {
-      continue;
-    };
-    let BindingPattern::BindingIdentifier(id) = &param.pattern else {
-      continue;
-    };
-    let name: &str = &id.name;
-    check_expression_value(
-      context,
-      name,
-      init,
-      init.span(),
-      AssignmentType::Parameter,
-    );
+    match &param.pattern {
+      BindingPattern::BindingIdentifier(id) => {
+        let Some(init) = &param.initializer else {
+          continue;
+        };
+        let name: &str = &id.name;
+        check_expression_value(
+          context,
+          name,
+          init,
+          init.span(),
+          AssignmentType::Parameter,
+        );
+      }
+      pattern => {
+        process_binding_pattern_defaults(
+          context,
+          pattern,
+          AssignmentType::Parameter,
+        );
+        if let Some(init) = &param.initializer {
+          process_expression(context, init);
+        }
+      }
+    }
   }
 }
 
@@ -728,12 +961,11 @@ fn process_class(context: &mut JsContext<'_>, class: &Class) {
   for element in &class.body.body {
     match element {
       ClassElement::MethodDefinition(method) => {
-        if let Some(class_name) = class_name {
-          if let Some(name) = property_key_name(&method.key) {
-            if name == "constructor" {
-              register_signature(class_name, &method.value.params);
-            }
-          }
+        if let Some(class_name) = class_name
+          && let Some(name) = property_key_name(&method.key)
+          && name == "constructor"
+        {
+          register_signature(class_name, &method.value.params);
         }
         process_function(context, &method.value);
       }
@@ -838,6 +1070,64 @@ fn string_literal(expression: &Expression) -> Option<String> {
   }
 }
 
+fn process_header_setter_call(
+  context: &mut JsContext<'_>,
+  call: &oxc_ast::ast::CallExpression<'_>,
+) {
+  let Expression::StaticMemberExpression(member) = &call.callee else {
+    return;
+  };
+
+  if !matches!(
+    member.property.name.as_str(),
+    "setHeader" | "setRequestHeader"
+  ) {
+    return;
+  }
+
+  let exprs: Vec<&Expression> = call
+    .arguments
+    .iter()
+    .filter_map(|a| a.as_expression())
+    .collect();
+
+  if exprs.len() >= 2
+    && let Some(name) = string_literal(exprs[0])
+  {
+    check_expression_value(
+      context,
+      &name,
+      exprs[1],
+      exprs[1].span(),
+      AssignmentType::Header,
+    );
+  }
+}
+
+fn process_header_object(
+  context: &mut JsContext<'_>,
+  obj: &oxc_ast::ast::ObjectExpression<'_>,
+) {
+  for prop in &obj.properties {
+    let ObjectPropertyKind::ObjectProperty(prop) = prop else {
+      continue;
+    };
+    if prop.method || prop.shorthand || prop.kind != PropertyKind::Init {
+      continue;
+    }
+    let Some(key_name) = property_key_name(&prop.key) else {
+      continue;
+    };
+    check_expression_value(
+      context,
+      &key_name,
+      &prop.value,
+      prop.value.span(),
+      AssignmentType::Header,
+    );
+  }
+}
+
 fn check_expression_value(
   context: &mut JsContext<'_>,
   name: &str,
@@ -852,13 +1142,22 @@ fn check_expression_value(
     }
 
     context.record_emitted(value_span);
-    if let Some(d) = check_assignment(
-      &normalize_name(&name.to_owned()),
-      &normalize_value(&value),
-      assignment_type,
-      context.source_context,
-      || compute_source_span(context, span),
-    ) {
+
+    let diag = if assignment_type == AssignmentType::Header {
+      check_header_assignment(name, &value, context.source_context, || {
+        compute_source_span(context, span)
+      })
+    } else {
+      check_assignment(
+        &normalize_name(&name.to_owned()),
+        &normalize_value(&value),
+        assignment_type,
+        context.source_context,
+        || compute_source_span(context, span),
+      )
+    };
+
+    if let Some(d) = diag {
       context.source_context.emit_diagnostic(d);
     }
 
@@ -1033,6 +1332,31 @@ fn check_expression_value(
       }
       process_expression(context, expression);
     }
+    Expression::ArrayExpression(array) => {
+      use oxc_ast::ast::ArrayExpressionElement;
+      for element in &array.elements {
+        match element {
+          ArrayExpressionElement::SpreadElement(spread) => {
+            process_expression(context, &spread.argument);
+          }
+          ArrayExpressionElement::Elision(_) => {}
+          _ => {
+            let expr = element.to_expression();
+            if string_literal(expr).is_some() {
+              check_expression_value(
+                context,
+                name,
+                expr,
+                expr.span(),
+                assignment_type,
+              );
+            } else {
+              process_expression(context, expr);
+            }
+          }
+        }
+      }
+    }
     _ => process_expression(context, expression),
   }
 }
@@ -1056,7 +1380,32 @@ fn register_signature(name: &str, params: &FormalParameters) {
   });
 }
 
-fn callee_name(expression: &Expression) -> Option<String> {
+fn free_function_callee(expression: &Expression) -> Option<String> {
+  match expression {
+    Expression::Identifier(id) => Some(id.name.to_string()),
+    _ => None,
+  }
+}
+
+fn auth_call_name(expression: &Expression) -> Option<String> {
+  match expression {
+    Expression::Identifier(id) => Some(id.name.to_string()),
+    Expression::StaticMemberExpression(member) => {
+      Some(member.property.name.to_string())
+    }
+    _ => None,
+  }
+}
+
+fn is_auth_call(name: &str) -> bool {
+  let lower = name.to_ascii_lowercase();
+  lower.contains("login")
+    || lower.contains("signin")
+    || lower.contains("authenticate")
+    || lower.contains("logon")
+}
+
+fn constructed_type_name(expression: &Expression) -> Option<String> {
   match expression {
     Expression::Identifier(id) => Some(id.name.to_string()),
     Expression::StaticMemberExpression(member) => {
@@ -1198,15 +1547,10 @@ fn compute_source_span(
   context: &JsContext<'_>,
   span: oxc_span::Span,
 ) -> SourceFileSpan {
-  let source = context.source;
-  let start_offset = span.start as usize;
-  let end_offset = span.end as usize;
-
-  SourceFileSpan {
-    file_abs_path: context.source_context.file_abs_path.to_path_buf(),
-    file_span: Some(SourceSpan {
-      start: offset_to_position(source, start_offset),
-      end: offset_to_position(source, end_offset),
-    }),
-  }
+  compute_file_span(
+    context.source_context,
+    context.source,
+    span.start as usize,
+    span.end as usize,
+  )
 }

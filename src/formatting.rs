@@ -1,9 +1,5 @@
 pub fn indefinite_article(text: &str) -> &'static str {
-  let first_word = text
-    .trim_start()
-    .split_whitespace()
-    .next()
-    .unwrap_or_default();
+  let first_word = text.split_whitespace().next().unwrap_or_default();
 
   if let Some(article) = phonetic_letter_override(first_word) {
     return article;
@@ -63,7 +59,7 @@ pub fn articulate(text: &str) -> String {
 }
 
 pub fn articulate_capitalize(text: &str) -> String {
-  format!("{} {}", uppercase_first(&indefinite_article(text)), text)
+  format!("{} {}", uppercase_first(indefinite_article(text)), text)
 }
 
 pub fn lowercase_first(s: &str) -> String {

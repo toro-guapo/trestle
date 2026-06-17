@@ -170,10 +170,10 @@ fn invocation_from_simple(simple: &SimpleCommand) -> Option<Invocation> {
   let mut args = Vec::new();
   if let Some(suffix) = &simple.suffix {
     for item in &suffix.0 {
-      if let CommandPrefixOrSuffixItem::Word(word) = item {
-        if let Some(arg) = unquote(&word.value) {
-          args.push(arg);
-        }
+      if let CommandPrefixOrSuffixItem::Word(word) = item
+        && let Some(arg) = unquote(&word.value)
+      {
+        args.push(arg);
       }
     }
   }

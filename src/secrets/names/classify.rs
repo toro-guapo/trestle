@@ -5,14 +5,14 @@ use crate::{
   scanning::{
     DISQUALIFIERS, EXCLUSIONS, KEY_DISQUALIFIERS, KEY_QUALIFIER_PHRASES,
     KEY_QUALIFIERS, STRONG_KEYWORD_PHRASES, STRONG_KEYWORDS,
-    TOKEN_DISQUALIFIERS, TOKEN_QUALIFIERS,
+    TOKEN_DISQUALIFIERS, TOKEN_QUALIFIERS, WEAK_SENSITIVE_PHRASES,
   },
   secrets::names::normalize::NormalizedName,
 };
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum NameKind {
-  Sensitive,
+  Sensitive { weak: bool },
   Key { weak: bool },
   Token { weak: bool },
   Mnemonic,
@@ -24,6 +24,29 @@ pub struct NameClass {
   pub service: Option<&'static Service>,
   pub kind: NameKind,
   pub name_words: Vec<String>,
+}
+
+const PASSWORD_NAME_SEGMENTS: &[&str] =
+  &["pass", "passphrase", "passwd", "password", "pwd"];
+
+pub fn is_password_name(normalized: &NormalizedName) -> bool {
+  let segments = normalized.segments();
+
+  let ends_with_password = segments
+    .last()
+    .is_some_and(|s| PASSWORD_NAME_SEGMENTS.contains(&s.as_str()));
+
+  let describes_field =
+    segments.iter().any(|s| EXCLUSIONS.contains(&s.as_str()));
+
+  ends_with_password && !describes_field
+}
+
+fn is_nonce_signing_head(segment: &str) -> bool {
+  matches!(
+    segment,
+    "key" | "salt" | "secret" | "password" | "passphrase" | "pwd"
+  )
 }
 
 pub fn classify_normalized_name(
@@ -39,6 +62,18 @@ pub fn classify_normalized_name(
 
   if segments.iter().any(|s| DISQUALIFIERS.contains(&s.as_str())) {
     return None;
+  }
+
+  // A "nonce" segment marks an anti-replay / CSRF token, which is public by
+  // design.
+  if let Some(position) = segments.iter().position(|s| s.as_str() == "nonce") {
+    let signs_nonces = segments
+      .get(position + 1)
+      .is_some_and(|next| is_nonce_signing_head(next.as_str()));
+
+    if !signs_nonces {
+      return None;
+    }
   }
 
   let mut could_be_key = false;
@@ -96,9 +131,20 @@ pub fn classify_normalized_name(
 
   let mut kind = 'kind: {
     let joined = segments.join("_");
+
+    if segments.len() == 1 && segments[0] == "auth" {
+      break 'kind NameKind::Sensitive { weak: false };
+    }
+
     for phrase in STRONG_KEYWORD_PHRASES {
       if joined.contains(phrase) {
-        break 'kind NameKind::Sensitive;
+        break 'kind NameKind::Sensitive { weak: false };
+      }
+    }
+
+    for phrase in WEAK_SENSITIVE_PHRASES {
+      if joined.contains(phrase) {
+        break 'kind NameKind::Sensitive { weak: true };
       }
     }
 
@@ -106,7 +152,7 @@ pub fn classify_normalized_name(
       let segment = segment.as_str();
 
       if STRONG_KEYWORDS.contains(&segment) {
-        break 'kind NameKind::Sensitive;
+        break 'kind NameKind::Sensitive { weak: false };
       } else if could_be_key && KEY_QUALIFIERS.contains(&segment) {
         break 'kind NameKind::Key { weak: false };
       } else if could_be_token && TOKEN_QUALIFIERS.contains(&segment) {

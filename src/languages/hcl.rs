@@ -52,10 +52,10 @@ impl Visit for HclVisitor<'_> {
     let span = hcl_edit::Span::span(&node.value);
 
     if SHELL_KEYS.contains(&key) {
-      if let Some(value) = node.value.as_str() {
-        if !value.is_empty() {
-          parse_shell_value(self, &value, span.clone());
-        }
+      if let Some(value) = node.value.as_str()
+        && !value.is_empty()
+      {
+        parse_shell_value(self, value, span.clone());
       }
     } else {
       let assignment_type = if self.backend_depth > 0 {
@@ -63,7 +63,13 @@ impl Visit for HclVisitor<'_> {
       } else {
         AssignmentType::Property
       };
-      check_expression_value(self, key, &node.value, span, assignment_type);
+      check_expression_value(
+        self,
+        key,
+        &node.value,
+        span.clone(),
+        assignment_type,
+      );
     }
 
     visit_attr(self, node);

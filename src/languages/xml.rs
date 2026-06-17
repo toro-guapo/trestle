@@ -57,25 +57,25 @@ fn process_node(ctx: &mut XmlContext, node: &roxmltree::Node) {
   }
 
   // Check key-value attribute pairs (name/key + value)
-  if let Some(nk) = name_or_key {
-    if let Some(v) = node.attribute("value") {
-      let value_range = node
-        .attributes()
-        .find(|a| a.name() == "value")
-        .map(|a| a.range_value())
-        .unwrap_or_else(|| node.range());
+  if let Some(nk) = name_or_key
+    && let Some(v) = node.attribute("value")
+  {
+    let value_range = node
+      .attributes()
+      .find(|a| a.name() == "value")
+      .map(|a| a.range_value())
+      .unwrap_or_else(|| node.range());
 
-      let key = nk.to_owned();
-      let value = v.to_owned();
-      if let Some(d) = check_assignment(
-        &normalize_name(&key),
-        &normalize_value(&value),
-        AssignmentType::Property,
-        ctx.source_context,
-        || compute_span(ctx, value_range.clone()),
-      ) {
-        ctx.source_context.emit_diagnostic(d);
-      }
+    let key = nk.to_owned();
+    let value = v.to_owned();
+    if let Some(d) = check_assignment(
+      &normalize_name(&key),
+      &normalize_value(&value),
+      AssignmentType::Property,
+      ctx.source_context,
+      || compute_span(ctx, value_range.clone()),
+    ) {
+      ctx.source_context.emit_diagnostic(d);
     }
   }
 

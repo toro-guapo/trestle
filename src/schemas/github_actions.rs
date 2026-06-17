@@ -9,5 +9,6 @@ pub fn handle(info: &SchemaValue) -> bool {
     super::parse_shell_value(info);
     return true;
   }
+
   false
 }

@@ -232,8 +232,7 @@ fn check_value(spec: &OptionSpec, item: &Item) -> Option<String> {
     DefaultValue::String(_) => match item.as_str() {
       None => Some(format!("Option `{}` expects a string.", spec.name)),
       Some(value) => {
-        if spec.name == "output-format"
-          && OutputFormat::from_str(value).is_none()
+        if spec.name == "output-format" && OutputFormat::parse(value).is_none()
         {
           Some(format!(
             "Option `{}` must be one of: {}.",

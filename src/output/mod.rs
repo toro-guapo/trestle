@@ -67,7 +67,7 @@ impl FormattedSummary {
   }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct ScanSummary {
   pub critical_count: usize,
   pub warning_count: usize,
@@ -76,15 +76,6 @@ pub struct ScanSummary {
 impl ScanSummary {
   pub fn total(&self) -> usize {
     self.critical_count.saturating_add(self.warning_count)
-  }
-}
-
-impl Default for ScanSummary {
-  fn default() -> Self {
-    Self {
-      critical_count: 0,
-      warning_count: 0,
-    }
   }
 }
 

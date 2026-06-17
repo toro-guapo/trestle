@@ -37,6 +37,9 @@ A recent stable Rust toolchain is the only prerequisite.
 cargo build --release
 ```
 
+This builds two binaries: `trestle`, which does not make network requests, and
+`trestle-net`, which can check whether found secrets are still live.
+
 ## Quick start
 
 In any project directory:
@@ -52,6 +55,20 @@ Other commands:
 - `trestle lsp` starts the language server.
 - `trestle mcp` starts the MCP server.
 - `trestle uninstall` removes the integration from a project.
+
+## Checking whether a secret is live
+
+The default `trestle` binary does not make network requests. The separate
+`trestle-net` binary adds an optional check that contacts each detected
+secret's provider to confirm whether the credential is still valid:
+
+```sh
+trestle-net scan --validate
+```
+
+Each finding is then labeled `(active)`, `(inactive)`, or `(could not
+verify)`. This check runs only in `trestle-net`, so the `trestle` binary
+remains fully offline.
 
 The full documentation is available at [trestlescan.com/documentation][docs].
 

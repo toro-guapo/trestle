@@ -1,0 +1,12 @@
+[package]
+name = "trestle-net"
+version = "1.4.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+fastrand = "2"
+mimalloc = { version = "*", features = ["v3"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+trestle = { path = "..", features = ["validation"] }

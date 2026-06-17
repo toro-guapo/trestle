@@ -24,6 +24,12 @@ const DEFAULT_SKIP_FILE_NAMES: &[&str] = &[];
 const DEFAULT_SKIP_FINGERPRINTS: &[&str] = &[];
 const DEFAULT_SKIP_GLOB: &[&str] = &[];
 const DEFAULT_SKIP_VCS_IGNORED: bool = true;
+#[cfg(feature = "validation")]
+const DEFAULT_VALIDATE: bool = false;
+#[cfg(feature = "validation")]
+const DEFAULT_VALIDATE_TIMEOUT_SECONDS: u64 = 30;
+#[cfg(feature = "validation")]
+const DEFAULT_VALIDATE_TIMEOUT_SECONDS_STR: &str = "30";
 const DEFAULT_VERBOSE: bool = false;
 
 #[cfg(feature = "git-history")]
@@ -51,8 +57,9 @@ pub struct ScopedName {
   pub rc_file: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum Command {
+  #[default]
   Scan,
   Watch,
   #[cfg(feature = "lsp")]
@@ -89,7 +96,7 @@ const UNINSTALL_COMMAND_DESCRIPTION: &str =
   "Uninstall trestle from the current project.";
 
 impl Command {
-  pub fn from_str(s: &str) -> Option<Self> {
+  pub fn parse(s: &str) -> Option<Self> {
     match s {
       SCAN_COMMAND_NAME => Some(Self::Scan),
       WATCH_COMMAND_NAME => Some(Self::Watch),
@@ -114,12 +121,6 @@ impl Command {
       Self::Install => INSTALL_COMMAND_NAME,
       Self::Uninstall => UNINSTALL_COMMAND_NAME,
     }
-  }
-}
-
-impl Default for Command {
-  fn default() -> Self {
-    Self::Scan
   }
 }
 
@@ -152,7 +153,7 @@ pub struct OutputFormatInfo {
 include!(concat!(env!("OUT_DIR"), "/output_formats.rs"));
 
 impl OutputFormat {
-  pub fn from_str(s: &str) -> Option<Self> {
+  pub fn parse(s: &str) -> Option<Self> {
     match s {
       "text" => Some(Self::Text),
       "csv" => Some(Self::Csv),
@@ -183,7 +184,7 @@ pub enum DeepMode {
 
 #[cfg(feature = "git-history")]
 impl DeepMode {
-  pub fn from_str(s: &str) -> Option<Self> {
+  pub fn parse(s: &str) -> Option<Self> {
     match s {
       "false" => Some(Self::Off),
       "true" => Some(Self::Full),
@@ -221,6 +222,10 @@ pub struct Options {
   pub skip_fingerprints: Vec<Fingerprint>,
   pub skip_glob: Vec<ScopedGlob>,
   pub skip_vcs_ignored: bool,
+  #[cfg(feature = "validation")]
+  pub validate: bool,
+  #[cfg(feature = "validation")]
+  pub validate_timeout_seconds: u64,
   pub verbose: bool,
 }
 
@@ -245,6 +250,10 @@ impl Default for Options {
       skip_fingerprints: Vec::new(),
       skip_glob: Vec::new(),
       skip_vcs_ignored: DEFAULT_SKIP_VCS_IGNORED,
+      #[cfg(feature = "validation")]
+      validate: DEFAULT_VALIDATE,
+      #[cfg(feature = "validation")]
+      validate_timeout_seconds: DEFAULT_VALIDATE_TIMEOUT_SECONDS,
       verbose: DEFAULT_VERBOSE,
     }
   }
@@ -257,19 +266,17 @@ impl Options {
     let mut cli_args: Vec<String> = Vec::new();
 
     let (command, rest) = match args.first() {
-      Some(first) if !first.starts_with('-') => {
-        match Command::from_str(first) {
-          Some(cmd) => (cmd, &args[1..]),
-          None => {
-            if std::path::Path::new(first).exists() {
-              (Command::default(), args)
-            } else {
-              eprintln!("Unknown command or path: \"{first}\".\n");
-              return ParseResult::ErrorWithHelp;
-            }
+      Some(first) if !first.starts_with('-') => match Command::parse(first) {
+        Some(cmd) => (cmd, &args[1..]),
+        None => {
+          if std::path::Path::new(first).exists() {
+            (Command::default(), args)
+          } else {
+            eprintln!("Unknown command or path: \"{first}\".\n");
+            return ParseResult::ErrorWithHelp;
           }
         }
-      }
+      },
       _ => (Command::default(), args),
     };
 
@@ -292,7 +299,7 @@ impl Options {
     ParseResult::Run {
       command,
       cli_args,
-      cli_options: default,
+      cli_options: Box::new(default),
       paths,
     }
   }
@@ -404,10 +411,10 @@ commits such as a1b2c3d4e5f6,0f9e8d7c6b5a.",
   #[cfg(feature = "git-history")]
   fn set_enum(&mut self, name: &str, value: &str) {
     #[cfg(feature = "git-history")]
-    if name == DEEP.name {
-      if let Some(mode) = DeepMode::from_str(value) {
-        self.deep = mode;
-      }
+    if name == DEEP.name
+      && let Some(mode) = DeepMode::parse(value)
+    {
+      self.deep = mode;
     }
   }
 
@@ -422,6 +429,11 @@ commits such as a1b2c3d4e5f6,0f9e8d7c6b5a.",
       self.show_summary = value;
     } else if name == VERBOSE.name {
       self.verbose = value;
+    }
+
+    #[cfg(feature = "validation")]
+    if name == VALIDATE.name {
+      self.validate = value;
     }
   }
 
@@ -447,10 +459,27 @@ such as a1b2c3d4e5f6.",
       return None;
     }
 
+    #[cfg(feature = "validation")]
+    if name == VALIDATE_TIMEOUT_SECONDS.name {
+      match value.parse::<u64>() {
+        Ok(seconds) if seconds > 0 => {
+          self.validate_timeout_seconds = seconds;
+          return None;
+        }
+        _ => {
+          eprintln!(
+            "--{} needs a positive whole number of seconds.",
+            VALIDATE_TIMEOUT_SECONDS.name
+          );
+          return Some(ParseResult::Error);
+        }
+      }
+    }
+
     if name == OUTPUT_FILE.name {
       self.output_file = value.to_owned();
     } else if name == OUTPUT_FORMAT.name {
-      if let Some(format) = OutputFormat::from_str(value) {
+      if let Some(format) = OutputFormat::parse(value) {
         self.output_format = format;
       } else {
         eprintln!(
@@ -501,10 +530,10 @@ such as a1b2c3d4e5f6.",
       add_scoped_names(&mut self.skip_file_names, anchor, value, rc_file);
     } else if name == SKIP_FINGERPRINTS.name {
       for entry in value {
-        if let Some(fingerprint) = Fingerprint::parse(&entry) {
-          if !self.skip_fingerprints.contains(&fingerprint) {
-            self.skip_fingerprints.push(fingerprint);
-          }
+        if let Some(fingerprint) = Fingerprint::parse(&entry)
+          && !self.skip_fingerprints.contains(&fingerprint)
+        {
+          self.skip_fingerprints.push(fingerprint);
         }
       }
     }
@@ -584,7 +613,7 @@ pub enum ParseResult {
   Run {
     command: Command,
     cli_args: Vec<String>,
-    cli_options: Options,
+    cli_options: Box<Options>,
     paths: Vec<String>,
   },
   Help,
@@ -840,6 +869,20 @@ pub const SKIP_VCS_IGNORED: OptionSpec = OptionSpec {
   default_value: DefaultValue::Bool(DEFAULT_SKIP_VCS_IGNORED),
 };
 
+#[cfg(feature = "validation")]
+pub const VALIDATE: OptionSpec = OptionSpec {
+  name: "validate",
+  description: "Check detected secrets against their providers to see if they are still active. Makes outbound network requests.",
+  default_value: DefaultValue::Bool(DEFAULT_VALIDATE),
+};
+
+#[cfg(feature = "validation")]
+pub const VALIDATE_TIMEOUT_SECONDS: OptionSpec = OptionSpec {
+  name: "validate-timeout-seconds",
+  description: "Maximum number of seconds to wait for each validation request.",
+  default_value: DefaultValue::String(DEFAULT_VALIDATE_TIMEOUT_SECONDS_STR),
+};
+
 pub const VERBOSE: OptionSpec = OptionSpec {
   name: "verbose",
   description: "Print additional scan information.",
@@ -865,5 +908,9 @@ pub const OPTION_SPECS: &[OptionSpec] = &[
   SKIP_FINGERPRINTS,
   SKIP_GLOB,
   SKIP_VCS_IGNORED,
+  #[cfg(feature = "validation")]
+  VALIDATE,
+  #[cfg(feature = "validation")]
+  VALIDATE_TIMEOUT_SECONDS,
   VERBOSE,
 ];

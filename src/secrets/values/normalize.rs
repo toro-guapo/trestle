@@ -15,6 +15,10 @@ impl NormalizedValue {
   pub fn len(&self) -> usize {
     self.lower.len()
   }
+
+  pub fn is_empty(&self) -> bool {
+    self.lower.is_empty()
+  }
 }
 
 pub fn normalize_value(value: &impl AsRef<str>) -> NormalizedValue {

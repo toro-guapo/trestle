@@ -72,14 +72,17 @@ pub enum ValueClass {
   Secret(NamedSecret),
   PossibleSecret,
   Public,
+  Placeholder,
 }
 
 impl std::fmt::Display for ValueClass {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     match self {
       ValueClass::PossibleSecret => write!(f, "possible secret"),
+      // trestle:skip "secret" represents the type of secret, it's not a value
       ValueClass::Secret(secret) => write!(f, "{}", secret),
       ValueClass::Public => write!(f, "public credential"),
+      ValueClass::Placeholder => write!(f, "placeholder"),
     }
   }
 }
@@ -99,7 +102,13 @@ pub fn classify_named_value(
 
   #[cfg(feature = "services")]
   if let Some(service) = name_class.service {
-    if service.matches(value.as_str()) {
+    if service.matches_public(value.as_str()) {
+      return Some(ValueClass::Public);
+    }
+
+    if service.matches(value.as_str())
+      && has_mixed_character_classes(value.as_str())
+    {
       return Some(ValueClass::Secret(NamedSecret::Service(service)));
     }
   }
@@ -111,16 +120,25 @@ pub fn classify_named_value(
     return Some(vc);
   }
 
-  // Unqualified ("weak") key/token names: require entropy, not just a
-  // non-dictionary value.
+  // "Weak" names (unqualified key/token, or a context-only sensitive phrase
+  // like a security answer): require entropy, not just a non-dictionary value.
   #[cfg(any(feature = "entropy-key", feature = "entropy-token"))]
   if matches!(
     name_class.kind,
-    NameKind::Key { weak: true } | NameKind::Token { weak: true }
+    NameKind::Key { weak: true }
+      | NameKind::Token { weak: true }
+      | NameKind::Sensitive { weak: true }
   ) {
     return (has_sufficient_entropy(value)
       && value_could_be_secret(value, &local_words))
     .then_some(ValueClass::PossibleSecret);
+  }
+
+  // Without entropy features compiled in, a weak sensitive name cannot be
+  // value-gated, so it is not treated as secret-bearing on the name alone.
+  #[cfg(not(any(feature = "entropy-key", feature = "entropy-token")))]
+  if matches!(name_class.kind, NameKind::Sensitive { weak: true }) {
+    return None;
   }
 
   if value_could_be_secret(value, &local_words) {
@@ -252,7 +270,6 @@ fn alphabet_size(value: &str) -> usize {
   size + symbols.iter().filter(|s| **s).count()
 }
 
-#[cfg(any(feature = "entropy-key", feature = "entropy-token"))]
 thread_local! {
   static COMMON_BIGRAMS: HashSet<[u8; 2]> = [
     // Top 50 - cover ~47% of all bigram occurrences in English.
@@ -277,10 +294,12 @@ thread_local! {
   ].into_iter().collect();
 }
 
-#[cfg(any(feature = "entropy-key", feature = "entropy-token"))]
 fn appears_language_like(value: &str) -> bool {
   let bytes = value.as_bytes();
-  if !bytes.iter().all(|b| b.is_ascii_alphabetic()) {
+  if !bytes
+    .iter()
+    .all(|b| b.is_ascii_alphabetic() || matches!(b, b' ' | b'-' | b'_' | b'.'))
+  {
     return false;
   }
 
@@ -294,6 +313,11 @@ fn appears_language_like(value: &str) -> bool {
   COMMON_BIGRAMS.with(|set| {
     let mut prev: Option<u8> = None;
     for &b in bytes {
+      // Separators break a word; do not form a bigram across them.
+      if !b.is_ascii_alphabetic() {
+        prev = None;
+        continue;
+      }
       if let Some(p) = prev {
         total += 1;
         if set.contains(&[p, b]) {
@@ -403,7 +427,13 @@ fn classify_value_evidence(
     && value_could_be_secret(value, local_words)
   {
     for service in &context.file_services {
-      if service.matches(value.as_str()) {
+      if service.matches_public(value.as_str()) {
+        return Some(ValueClass::Public);
+      }
+
+      if service.matches(value.as_str())
+        && has_mixed_character_classes(value.as_str())
+      {
         return Some(ValueClass::Secret(NamedSecret::Service(service)));
       }
     }
@@ -615,7 +645,7 @@ fn is_credit_card_number(value: &NormalizedValue) -> bool {
     sum += x;
     double = !double;
   }
-  sum % 10 == 0
+  sum.is_multiple_of(10)
 }
 
 fn classify_value_body(
@@ -684,6 +714,18 @@ fn classify_putty(value: &NormalizedValue) -> Option<ValueClass> {
 #[cfg(feature = "signatures")]
 fn classify_signature(value: &NormalizedValue) -> Option<ValueClass> {
   let sig = signatures::scan(value.original())?;
+  classify_matched_signature(sig, value)
+}
+
+#[cfg(feature = "signatures")]
+pub(crate) fn classify_matched_signature(
+  sig: &'static Signature,
+  value: &NormalizedValue,
+) -> Option<ValueClass> {
+  if sig.is_placeholder() {
+    return Some(ValueClass::Placeholder);
+  }
+
   let lower = value.as_str();
   let suppresses = PLACEHOLDER_SUBSTRINGS
     .iter()
@@ -714,10 +756,14 @@ fn value_could_be_secret(
 
   !is_known_words(value, local_words)
     && !is_multi_segment_word_identifier(value)
-    && !contains_non_ascii_letter(value.as_str())
+    && !contains_long_known_word(value.as_str())
+    && has_secret_value_shape(value)
+}
+
+fn has_secret_value_shape(value: &NormalizedValue) -> bool {
+  !contains_non_ascii_letter(value.as_str())
     && !is_file_path(value)
     && !is_placeholder(value)
-    && !contains_long_known_word(value.as_str())
     && !is_markup(value)
     && !is_sentinel(value)
     && !is_event(value)
@@ -732,6 +778,99 @@ fn value_could_be_secret(
     && !is_mime_type(value)
     && !is_datetime(value)
     && !is_aws_arn(value)
+    && !is_natural_language(value)
+    && !is_sequential_run(value)
+    && !is_all_symbols(value)
+}
+
+fn is_natural_language(value: &NormalizedValue) -> bool {
+  value.as_str().contains(' ') && appears_language_like(value.as_str())
+}
+
+fn is_sequential_run(value: &NormalizedValue) -> bool {
+  const MIN_LEN: usize = 8;
+
+  let bytes = value.as_str().as_bytes();
+  if bytes.len() < MIN_LEN {
+    return false;
+  }
+
+  let one_class = bytes.iter().all(u8::is_ascii_digit)
+    || bytes.iter().all(u8::is_ascii_alphabetic);
+  if !one_class {
+    return false;
+  }
+
+  let ascending = bytes.windows(2).all(|w| w[1] == w[0] + 1);
+  let descending = bytes.windows(2).all(|w| w[0] == w[1] + 1);
+
+  ascending || descending
+}
+
+fn is_all_symbols(value: &NormalizedValue) -> bool {
+  let s = value.as_str();
+  !s.is_empty() && !s.bytes().any(|b| b.is_ascii_alphanumeric())
+}
+
+#[cfg(feature = "services")]
+fn has_mixed_character_classes(s: &str) -> bool {
+  let mut classes = 0u8;
+
+  if s.bytes().any(|b| b.is_ascii_alphabetic()) {
+    classes += 1;
+  }
+
+  if s.bytes().any(|b| b.is_ascii_digit()) {
+    classes += 1;
+  }
+
+  if s
+    .bytes()
+    .any(|b| b.is_ascii() && !b.is_ascii_alphanumeric())
+  {
+    classes += 1;
+  }
+
+  classes >= 2
+}
+
+pub(crate) fn value_is_weak_password(value: &NormalizedValue) -> bool {
+  const MIN_PASSWORD_LEN: usize = 4;
+
+  value.len() >= MIN_PASSWORD_LEN
+    && !is_template_expression(value)
+    && !is_variable_reference(value.as_str())
+    && has_secret_value_shape(value)
+    && has_password_signal(value.as_str())
+}
+
+fn has_password_signal(value: &str) -> bool {
+  value.bytes().any(|b| b.is_ascii_digit())
+    || value.contains("pass")
+    || value.contains("pwd")
+}
+
+pub(crate) fn value_is_password_literal(value: &NormalizedValue) -> bool {
+  const MIN_PASSWORD_LEN: usize = 4;
+
+  value.len() >= MIN_PASSWORD_LEN
+    && !is_template_expression(value)
+    && !is_variable_reference(value.as_str())
+    && !is_placeholder(value)
+    && !is_sentinel(value)
+}
+
+fn is_variable_reference(value: &str) -> bool {
+  let v = value.trim();
+  v.contains("${")
+    || v.contains("{{")
+    || v.contains("#{")
+    || (v.starts_with('$')
+      && v.len() > 1
+      && v
+        .bytes()
+        .skip(1)
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_'))
 }
 
 fn contains_non_ascii_letter(value: &str) -> bool {
@@ -1002,37 +1141,39 @@ fn is_template_expression(value: &NormalizedValue) -> bool {
 
 fn is_markup(value: &NormalizedValue) -> bool {
   let lower = value.as_str();
-  if starts_with_html_entity(lower) {
-    return true;
-  }
+  starts_with_html_entity(lower) || is_html_tag_at(lower.as_bytes(), 0)
+}
 
-  let b = lower.as_bytes();
-  if b.first().copied() != Some(b'<') {
+// An HTML tag (`<tag`, `<!doctype`, `<!-- -->`, `<?xml`) beginning at `offset`.
+pub(crate) fn is_html_tag_at(b: &[u8], offset: usize) -> bool {
+  if b.get(offset).copied() != Some(b'<') {
     return false;
   }
 
-  match b.get(1).copied() {
+  match b.get(offset + 1).copied() {
     Some(b'?') => {
       // <?xml - at least 3 alphabetic after ?
-      b.get(2).is_some_and(|c| c.is_ascii_alphabetic())
-        && b.get(3).is_some_and(|c| c.is_ascii_alphabetic())
-        && b.get(4).is_some_and(|c| c.is_ascii_alphabetic())
+      b.get(offset + 2).is_some_and(|c| c.is_ascii_alphabetic())
+        && b.get(offset + 3).is_some_and(|c| c.is_ascii_alphabetic())
+        && b.get(offset + 4).is_some_and(|c| c.is_ascii_alphabetic())
     }
     Some(b'!') => {
-      if b.get(2).copied() == Some(b'-') && b.get(3).copied() == Some(b'-') {
+      if b.get(offset + 2).copied() == Some(b'-')
+        && b.get(offset + 3).copied() == Some(b'-')
+      {
         // <!-- comment -->
         return true;
       }
       // <!DOCTYPE - at least 3 alphabetic after !
-      b.get(2).is_some_and(|c| c.is_ascii_alphabetic())
-        && b.get(3).is_some_and(|c| c.is_ascii_alphabetic())
-        && b.get(4).is_some_and(|c| c.is_ascii_alphabetic())
+      b.get(offset + 2).is_some_and(|c| c.is_ascii_alphabetic())
+        && b.get(offset + 3).is_some_and(|c| c.is_ascii_alphabetic())
+        && b.get(offset + 4).is_some_and(|c| c.is_ascii_alphabetic())
     }
     Some(c) if c.is_ascii_alphabetic() => {
       // <tag - second char must be alphabetic, space, or end of string
-      b.len() == 2
+      b.len() == offset + 2
         || b
-          .get(2)
+          .get(offset + 2)
           .is_some_and(|c| c.is_ascii_alphabetic() || *c == b' ' || *c == b'>')
     }
     _ => false,
@@ -1136,8 +1277,7 @@ pub fn is_known_words(value: &NormalizedValue, local_words: &[&str]) -> bool {
       return false;
     }
 
-    let is_known =
-      |s: &str| set.contains(s) || local_words.iter().any(|w| *w == s);
+    let is_known = |s: &str| set.contains(s) || local_words.contains(&s);
 
     let matched: Vec<&str> = alphabetic
       .iter()

@@ -9,12 +9,17 @@ pub use crate::secrets::headers::check_header;
 use crate::secrets::text_secret::TextSecret;
 use crate::secrets::{
   names::{
-    classify::{NameClass, NameKind, classify_normalized_name},
-    normalize::NormalizedName,
+    classify::{
+      NameClass, NameKind, classify_normalized_name, is_password_name,
+    },
+    normalize::{NormalizedName, normalize_name},
   },
   values::{
-    classify::{NamedSecret, ValueClass, classify_named_value, classify_value},
-    normalize::NormalizedValue,
+    classify::{
+      NamedSecret, ValueClass, classify_named_value, classify_value,
+      value_is_password_literal, value_is_weak_password,
+    },
+    normalize::{NormalizedValue, normalize_value},
   },
 };
 pub use crate::source::{
@@ -23,7 +28,7 @@ pub use crate::source::{
 
 include!(concat!(env!("OUT_DIR"), "/rule_ids.rs"));
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Severity {
   Critical,
   Warning,
@@ -121,6 +126,7 @@ pub enum Diagnostic {
     severity: Severity,
     file_type: Option<FileType>,
     fingerprint: Fingerprint,
+    from_content_scan: bool,
   },
   BinarySecret {
     secret: BinarySecret,
@@ -190,6 +196,14 @@ impl Diagnostic {
       Diagnostic::SecretValue { .. } => RULES[1].0,
       Diagnostic::BinarySecret { .. } => RULES[2].0,
       Diagnostic::TextSecret { .. } => RULES[3].0,
+    }
+  }
+
+  pub fn value_class(&self) -> Option<&ValueClass> {
+    match self {
+      Diagnostic::SecretAssignment { value_class, .. }
+      | Diagnostic::SecretValue { value_class, .. } => Some(value_class),
+      _ => None,
     }
   }
 
@@ -280,46 +294,135 @@ pub fn check_assignment(
   context: &SourceContext,
   resolve_span: impl Fn() -> SourceFileSpan,
 ) -> Option<Diagnostic> {
+  classify_assignment(name, value, assignment_type, context, &resolve_span)
+    .or_else(|| {
+      check_connection_string(
+        value.original(),
+        assignment_type,
+        context,
+        &resolve_span,
+      )
+    })
+}
+
+pub fn check_assignment_in_scope(
+  scope: &[&str],
+  name: &NormalizedName,
+  value: &NormalizedValue,
+  assignment_type: AssignmentType,
+  context: &SourceContext,
+  resolve_span: impl Fn() -> SourceFileSpan,
+) -> Option<Diagnostic> {
+  if scope.is_empty() {
+    return check_assignment(
+      name,
+      value,
+      assignment_type,
+      context,
+      resolve_span,
+    );
+  }
+
+  let mut folded = scope.join(".");
+  folded.push('.');
+  folded.push_str(name.original());
+
+  check_assignment(
+    &normalize_name(&folded),
+    value,
+    assignment_type,
+    context,
+    resolve_span,
+  )
+}
+
+fn classify_assignment(
+  name: &NormalizedName,
+  value: &NormalizedValue,
+  assignment_type: AssignmentType,
+  context: &SourceContext,
+  resolve_span: impl Fn() -> SourceFileSpan,
+) -> Option<Diagnostic> {
   type K = NameKind;
   type V = ValueClass;
 
   let name_class = classify_normalized_name(name);
   let value_class = match &name_class {
-    Some(nc) => classify_named_value(nc, value, context)?,
-    None => classify_value(value, context)?,
+    Some(nc) => classify_named_value(nc, value, context),
+    None => classify_value(value, context),
   };
 
-  let name_kind = name_class.as_ref().map(|nc| &nc.kind);
+  let password_field = is_password_name(name)
+    && crate::languages::is_declarative_config_file(context.file_abs_path);
 
-  let severity = match (name_kind, &value_class) {
-    (_, V::Public) => return None,
+  if let Some(value_class) = value_class {
+    let name_kind = name_class.as_ref().map(|nc| &nc.kind);
+
+    let severity = match (name_kind, &value_class) {
+      (_, V::Public) => return None,
+      (_, V::Placeholder) => return None,
+      #[cfg(feature = "pem")]
+      (_, V::Secret(NamedSecret::PrivateKey(_))) => Severity::Critical,
+      #[cfg(feature = "putty")]
+      (_, V::Secret(NamedSecret::PuttyKey(_))) => Severity::Critical,
+      #[cfg(feature = "signatures")]
+      (_, V::Secret(NamedSecret::Signature(_))) => Severity::Critical,
+      #[cfg(feature = "services")]
+      (_, V::Secret(NamedSecret::Service(_))) => Severity::Warning,
+      #[cfg(feature = "url")]
+      (_, V::Secret(NamedSecret::Url(_))) => Severity::Warning,
+      (_, V::Secret(NamedSecret::CreditCard)) => Severity::Critical,
+      (Some(K::Mnemonic), V::Secret(NamedSecret::Mnemonic)) => {
+        Severity::Warning
+      }
+      (Some(K::Mnemonic), _) => return None,
+      (Some(K::Sensitive { .. }), _) => Severity::Warning,
+      (Some(K::Key { .. } | K::Token { .. }), _) => Severity::Warning,
+      // A `pass`-style key (not a strong keyword) with a secret-looking value.
+      (None, _) if password_field => Severity::Warning,
+      (None, _) => return None,
+    };
+
+    return Some(Diagnostic::SecretAssignment {
+      name: name.original().to_string(),
+      assignment_type,
+      value_class,
+      source_span: resolve_span(),
+      severity,
+      file_type: context.file_type,
+      fingerprint: assignment_fingerprint(value.original().as_bytes()),
+    });
+  }
+
+  if password_field && value_is_weak_password(value) {
+    return Some(Diagnostic::SecretAssignment {
+      name: name.original().to_string(),
+      assignment_type,
+      value_class: ValueClass::PossibleSecret,
+      source_span: resolve_span(),
+      severity: Severity::Warning,
+      file_type: context.file_type,
+      fingerprint: assignment_fingerprint(value.original().as_bytes()),
+    });
+  }
+
+  None
+}
+
+pub(crate) fn secret_value_severity(
+  value_class: &ValueClass,
+) -> Option<Severity> {
+  match value_class {
+    ValueClass::Public => None,
+    ValueClass::Placeholder => None,
     #[cfg(feature = "pem")]
-    (_, V::Secret(NamedSecret::PrivateKey(_))) => Severity::Critical,
+    ValueClass::Secret(NamedSecret::PrivateKey(_)) => Some(Severity::Critical),
     #[cfg(feature = "putty")]
-    (_, V::Secret(NamedSecret::PuttyKey(_))) => Severity::Critical,
+    ValueClass::Secret(NamedSecret::PuttyKey(_)) => Some(Severity::Critical),
     #[cfg(feature = "signatures")]
-    (_, V::Secret(NamedSecret::Signature(_))) => Severity::Critical,
-    #[cfg(feature = "services")]
-    (_, V::Secret(NamedSecret::Service(_))) => Severity::Warning,
-    #[cfg(feature = "url")]
-    (_, V::Secret(NamedSecret::Url(_))) => Severity::Warning,
-    (_, V::Secret(NamedSecret::CreditCard)) => Severity::Critical,
-    (Some(K::Mnemonic), V::Secret(NamedSecret::Mnemonic)) => Severity::Warning,
-    (Some(K::Mnemonic), _) => return None,
-    (Some(K::Sensitive), _) => Severity::Warning,
-    (Some(K::Key { .. } | K::Token { .. }), _) => Severity::Warning,
-    (None, _) => return None,
-  };
-
-  Some(Diagnostic::SecretAssignment {
-    name: name.original().to_string(),
-    assignment_type,
-    value_class,
-    source_span: resolve_span(),
-    severity,
-    file_type: context.file_type,
-    fingerprint: assignment_fingerprint(value.original().as_bytes()),
-  })
+    ValueClass::Secret(NamedSecret::Signature(_)) => Some(Severity::Critical),
+    _ => Some(Severity::Warning),
+  }
 }
 
 pub fn check_credential_assignment(
@@ -332,21 +435,11 @@ pub fn check_credential_assignment(
   let synthetic = NameClass {
     #[cfg(feature = "services")]
     service: None,
-    kind: NameKind::Sensitive,
+    kind: NameKind::Sensitive { weak: false },
     name_words: Vec::new(),
   };
   let value_class = classify_named_value(&synthetic, value, context)?;
-
-  let severity = match &value_class {
-    ValueClass::Public => return None,
-    #[cfg(feature = "pem")]
-    ValueClass::Secret(NamedSecret::PrivateKey(_)) => Severity::Critical,
-    #[cfg(feature = "putty")]
-    ValueClass::Secret(NamedSecret::PuttyKey(_)) => Severity::Critical,
-    #[cfg(feature = "signatures")]
-    ValueClass::Secret(NamedSecret::Signature(_)) => Severity::Critical,
-    _ => Severity::Warning,
-  };
+  let severity = secret_value_severity(&value_class)?;
 
   Some(Diagnostic::SecretAssignment {
     name: display_name.to_string(),
@@ -359,7 +452,131 @@ pub fn check_credential_assignment(
   })
 }
 
+pub fn check_password_field(
+  display_name: &str,
+  value: &str,
+  assignment_type: AssignmentType,
+  context: &SourceContext,
+  resolve_span: impl Fn() -> SourceFileSpan,
+) -> Option<Diagnostic> {
+  if !value_is_password_literal(&normalize_value(&value)) {
+    return None;
+  }
+
+  Some(Diagnostic::SecretAssignment {
+    name: display_name.to_string(),
+    assignment_type,
+    value_class: ValueClass::PossibleSecret,
+    source_span: resolve_span(),
+    severity: Severity::Warning,
+    file_type: context.file_type,
+    fingerprint: assignment_fingerprint(value.as_bytes()),
+  })
+}
+
+const CONNECTION_SECRET_KEYS: &[&str] = &[
+  "accesskey",
+  "accountkey",
+  "awssecretaccesskey",
+  "awssecretkey",
+  "clientsecret",
+  "password",
+  "pwd",
+  "secret",
+  "secretaccesskey",
+  "sharedaccesskey",
+  "sharedaccesssignature",
+];
+
+pub fn check_connection_string(
+  value: &str,
+  assignment_type: AssignmentType,
+  context: &SourceContext,
+  resolve_span: impl Fn() -> SourceFileSpan,
+) -> Option<Diagnostic> {
+  if value.split(';').filter(|pair| pair.contains('=')).count() < 2 {
+    return None;
+  }
+
+  for pair in value.split(';') {
+    let Some((key, component)) = pair.split_once('=') else {
+      continue;
+    };
+    let normalized_key = key
+      .chars()
+      .filter(|c| c.is_ascii_alphanumeric())
+      .collect::<String>()
+      .to_ascii_lowercase();
+    if !CONNECTION_SECRET_KEYS.contains(&normalized_key.as_str()) {
+      continue;
+    }
+
+    let component = component.trim().trim_matches(|c| c == '"' || c == '\'');
+    if component.is_empty() {
+      continue;
+    }
+
+    if let Some(diagnostic) = check_credential_assignment(
+      key.trim(),
+      &normalize_value(&component),
+      assignment_type,
+      context,
+      &resolve_span,
+    ) {
+      return Some(diagnostic);
+    }
+  }
+
+  None
+}
+
+pub fn strip_build_config_quotes(raw: &str) -> &str {
+  let trimmed = raw.trim();
+
+  let trimmed = trimmed
+    .strip_prefix("\\\"")
+    .or_else(|| trimmed.strip_prefix('"'))
+    .unwrap_or(trimmed);
+
+  trimmed
+    .strip_suffix("\\\"")
+    .or_else(|| trimmed.strip_suffix('"'))
+    .unwrap_or(trimmed)
+}
+
+pub fn check_header_assignment(
+  name: &str,
+  value: &str,
+  context: &SourceContext,
+  resolve_span: impl Fn() -> SourceFileSpan,
+) -> Option<Diagnostic> {
+  check_header(name, value, context, &resolve_span).or_else(|| {
+    check_assignment(
+      &normalize_name(&name),
+      &normalize_value(&value),
+      AssignmentType::Header,
+      context,
+      resolve_span,
+    )
+  })
+}
+
 pub fn check_value(
+  value: &NormalizedValue,
+  context: &SourceContext,
+  resolve_span: impl Fn() -> SourceFileSpan,
+) -> Option<Diagnostic> {
+  classify_value_only(value, context, &resolve_span).or_else(|| {
+    check_connection_string(
+      value.original(),
+      AssignmentType::Variable,
+      context,
+      &resolve_span,
+    )
+  })
+}
+
+fn classify_value_only(
   value: &NormalizedValue,
   context: &SourceContext,
   resolve_span: impl Fn() -> SourceFileSpan,
@@ -386,6 +603,7 @@ pub fn check_value(
     severity,
     file_type: context.file_type,
     fingerprint: value_fingerprint(value.original().as_bytes()),
+    from_content_scan: false,
   })
 }
 
@@ -481,6 +699,8 @@ pub struct AnnotatedDiagnostic {
   pub diagnostic: Diagnostic,
   #[cfg(feature = "git-history")]
   pub history: Option<HistoryAttribution>,
+  #[cfg(feature = "validation")]
+  pub validation: Option<crate::validation::ValidationStatus>,
 }
 
 impl AnnotatedDiagnostic {
@@ -489,7 +709,14 @@ impl AnnotatedDiagnostic {
       diagnostic,
       #[cfg(feature = "git-history")]
       history: None,
+      #[cfg(feature = "validation")]
+      validation: None,
     }
+  }
+
+  #[cfg(feature = "validation")]
+  pub fn validation(&self) -> Option<crate::validation::ValidationStatus> {
+    self.validation
   }
 
   pub fn severity(&self) -> &Severity {

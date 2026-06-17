@@ -11,9 +11,7 @@ pub const STRONG_KEYWORDS: &[&str] = &[
   "webhook",
 ];
 
-pub const STRONG_KEYWORD_PHRASES: &[&str] = &[
-  "pin_code",
-  "pin_number",
-  "security_answer",
-  "security_question",
-];
+pub const STRONG_KEYWORD_PHRASES: &[&str] = &["pin_code", "pin_number"];
+
+pub const WEAK_SENSITIVE_PHRASES: &[&str] =
+  &["security_answer", "security_question"];

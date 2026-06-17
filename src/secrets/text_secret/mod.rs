@@ -4,6 +4,8 @@ use std::ops::Range;
 pub mod pem;
 #[cfg(feature = "putty")]
 pub mod putty;
+#[cfg(feature = "rails-master-key")]
+pub mod rails;
 
 #[cfg(feature = "pem")]
 use crate::secrets::pem::PrivateKey;
@@ -16,6 +18,8 @@ pub enum TextSecret {
   Pem(Vec<PrivateKey>),
   #[cfg(feature = "putty")]
   Putty(Vec<PuttyKey>),
+  #[cfg(feature = "rails-master-key")]
+  RailsMasterKey,
 }
 
 impl std::fmt::Display for TextSecret {
@@ -34,6 +38,12 @@ impl std::fmt::Display for TextSecret {
       && let Some(first) = keys.first()
     {
       return write!(f, "{first}");
+    }
+
+    #[cfg(feature = "rails-master-key")]
+    #[allow(irrefutable_let_patterns)]
+    if let Self::RailsMasterKey = self {
+      return write!(f, "Rails master key");
     }
 
     let _ = f;
@@ -82,7 +92,7 @@ fn is_comment_line(line: &str) -> bool {
 
 #[cfg(any(feature = "pem", feature = "putty"))]
 fn is_header_line(line: &str) -> bool {
-  if let Some(separator) = line.find(|c: char| c == ':' || c == '=') {
+  if let Some(separator) = line.find([':', '=']) {
     let Some(prefix) = line.get(..separator) else {
       return false;
     };

@@ -6,7 +6,7 @@ use crate::{
   analysis::{Analyzer, CallFrame, FunctionSignature},
   diagnostic::{
     AssignmentType, Diagnostic, SourceFileSpan, SourceSpan, check_assignment,
-    check_value, offset_to_position,
+    check_header_assignment, check_value, offset_to_position,
   },
   processing::SourceContext,
   secrets::{
@@ -437,18 +437,11 @@ fn process_tuple_expression(ctx: &mut RustContext, node: Node, source: &[u8]) {
 // Function / method calls
 // -----------------------------------------------------------------------------
 
-const NAME_VALUE_SETTERS: &[&str] = &[
-  "add_header",
-  "addheader",
-  "header",
-  "insert",
-  "put",
-  "set",
-  "set_header",
-  "set_var",
-  "setdefault",
-  "setenv",
-];
+const HEADER_SETTERS: &[&str] =
+  &["add_header", "addheader", "header", "set_header"];
+
+const NAME_VALUE_SETTERS: &[&str] =
+  &["insert", "put", "set", "set_var", "setdefault", "setenv"];
 
 fn process_call(ctx: &mut RustContext, node: Node, source: &[u8]) {
   let Some(func_node) = node.child_by_field_name("function") else {
@@ -464,8 +457,17 @@ fn process_call(ctx: &mut RustContext, node: Node, source: &[u8]) {
 
   // Pattern 1: `Map::insert(...)`, `env::set_var(...)`, `client.put(...)`,
   // etc. The first arg is a string key, the second is the value.
-  if let Some(name) = &last_segment
-    && NAME_VALUE_SETTERS.contains(&name.as_str())
+  let setter_type = last_segment.as_deref().and_then(|name| {
+    if HEADER_SETTERS.contains(&name) {
+      Some(AssignmentType::Header)
+    } else if NAME_VALUE_SETTERS.contains(&name) {
+      Some(AssignmentType::Argument)
+    } else {
+      None
+    }
+  });
+
+  if let Some(setter_type) = setter_type
     && args.len() >= 2
     && let Some(key) = extract_string(args[0], source)
   {
@@ -475,7 +477,7 @@ fn process_call(ctx: &mut RustContext, node: Node, source: &[u8]) {
       args[1],
       args[1],
       source,
-      AssignmentType::Argument,
+      setter_type,
     );
     return;
   }
@@ -511,7 +513,12 @@ fn process_call(ctx: &mut RustContext, node: Node, source: &[u8]) {
   }
 
   // Pattern 4: signature resolution. If we know the callee's parameter
-  // names, pair each positional string arg with its parameter.
+  // names, pair each positional string arg with its parameter. A method
+  // call on a value (`receiver.method(...)`) has an unknown receiver type.
+  if is_method_call(func_node) {
+    return;
+  }
+
   let callee = match &last_segment {
     Some(name) => name.clone(),
     None => match node_text(func_node, source) {
@@ -577,6 +584,16 @@ fn method_name_for_setter(func: Node, source: &[u8]) -> Option<String> {
   }
   let field = func.child_by_field_name("field")?;
   node_text(field, source)
+}
+
+fn is_method_call(func: Node) -> bool {
+  match func.kind() {
+    "field_expression" => true,
+    "generic_function" => func
+      .child_by_field_name("function")
+      .is_some_and(is_method_call),
+    _ => false,
+  }
 }
 
 fn resolve_arguments(
@@ -705,13 +722,13 @@ fn try_name_type_value(
   // Walk forward to find an `=` token at the same nesting level. Stop
   // if we hit a statement boundary (`;` or `,`).
   let mut equals_pos = None;
-  for j in (start + 2)..children.len() {
-    let kind = children[j].kind();
-    if !children[j].is_named() && kind == "=" {
+  for (j, child) in children.iter().enumerate().skip(start + 2) {
+    let kind = child.kind();
+    if !child.is_named() && kind == "=" {
       equals_pos = Some(j);
       break;
     }
-    if !children[j].is_named() && matches!(kind, ";" | ",") {
+    if !child.is_named() && matches!(kind, ";" | ",") {
       return None;
     }
   }
@@ -901,6 +918,11 @@ fn check_expression_value(
 
     let normalized = normalize_value(&value);
     let diag: Option<Diagnostic> = match name {
+      Some(n) if assignment_type == AssignmentType::Header => {
+        check_header_assignment(n, &value, ctx.source_context, || {
+          compute_span(ctx, span_node)
+        })
+      }
       Some(n) => check_assignment(
         &normalize_name(&n.to_owned()),
         &normalized,
@@ -1310,7 +1332,7 @@ fn check_expression_value(
       for child in named_children(value_node) {
         check_expression_value(
           ctx,
-          None,
+          name,
           child,
           span_node,
           source,

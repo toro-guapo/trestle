@@ -10,8 +10,8 @@ use ruff_text_size::{Ranged, TextRange};
 use crate::{
   analysis::{Analyzer, CallFrame, FunctionSignature},
   diagnostic::{
-    AssignmentType, SourceFileSpan, SourceSpan, check_assignment, check_value,
-    offset_to_position,
+    AssignmentType, SourceFileSpan, SourceSpan, check_assignment,
+    check_header_assignment, check_value, offset_to_position,
   },
   processing::SourceContext,
   secrets::{
@@ -222,13 +222,20 @@ fn check_expression_value(
       return;
     }
     let name = name.to_owned();
-    if let Some(d) = check_assignment(
-      &normalize_name(&name),
-      &normalize_value(&value),
-      assignment_type,
-      ctx.source_context,
-      || compute_span(ctx, span),
-    ) {
+    let diag = if assignment_type == AssignmentType::Header {
+      check_header_assignment(&name, &value, ctx.source_context, || {
+        compute_span(ctx, span)
+      })
+    } else {
+      check_assignment(
+        &normalize_name(&name),
+        &normalize_value(&value),
+        assignment_type,
+        ctx.source_context,
+        || compute_span(ctx, span),
+      )
+    };
+    if let Some(d) = diag {
       ctx.record_emitted(start, end);
       ctx.source_context.emit_diagnostic(d);
     }
@@ -281,6 +288,21 @@ fn check_expression_value(
       }
       process_call(ctx, call);
     }
+    Expr::List(list) => {
+      for elt in list.elts.iter() {
+        check_expression_value(ctx, name, elt, elt.range(), assignment_type);
+      }
+    }
+    Expr::Tuple(tuple) => {
+      for elt in tuple.elts.iter() {
+        check_expression_value(ctx, name, elt, elt.range(), assignment_type);
+      }
+    }
+    Expr::Set(set) => {
+      for elt in set.elts.iter() {
+        check_expression_value(ctx, name, elt, elt.range(), assignment_type);
+      }
+    }
     _ => process_expr_value(ctx, expr),
   }
 }
@@ -308,6 +330,7 @@ fn process_expr_value(ctx: &mut PythonContext, expr: &Expr) {
 
   match expr {
     Expr::Call(call) => process_call(ctx, call),
+    Expr::Await(await_expr) => process_expr_value(ctx, &await_expr.value),
     Expr::Dict(dict) => process_dict(ctx, dict),
     Expr::Named(named) => process_named(ctx, named),
     Expr::Lambda(lambda) => process_lambda(ctx, lambda),
@@ -334,6 +357,14 @@ fn process_call(ctx: &mut PythonContext, call: &ExprCall) {
     };
 
     let name = arg.to_string();
+
+    // requests.get(url, headers={"Authorization": "Bearer ..."})
+    if name == "headers"
+      && let Expr::Dict(dict) = &keyword.value
+    {
+      process_header_dict(ctx, dict);
+      continue;
+    }
     check_expression_value(
       ctx,
       &name,
@@ -343,21 +374,30 @@ fn process_call(ctx: &mut PythonContext, call: &ExprCall) {
     );
   }
 
-  // os.putenv("KEY", value) / os.environ.setdefault("KEY", value).
+  // os.putenv("KEY", value) / os.environ.setdefault("KEY", value) set a
+  // name + value; the request.add_header / http.client putheader methods set an
+  // HTTP header. add_header/putheader are methods, never free functions.
+  let is_method = matches!(call.func.as_ref(), Expr::Attribute(_));
   if let Some(callee) = callee_name(&call.func) {
-    if callee == "putenv" || callee == "setdefault" {
+    let setter_type = match callee.as_str() {
+      "putenv" | "setdefault" => Some(AssignmentType::Argument),
+      "add_header" | "putheader" if is_method => Some(AssignmentType::Header),
+      _ => None,
+    };
+
+    if let Some(setter_type) = setter_type {
       let args = &call.arguments.args;
-      if args.len() >= 2 {
-        if let Some(key) = extract_string_value(&args[0]) {
-          check_expression_value(
-            ctx,
-            &key,
-            &args[1],
-            args[1].range(),
-            AssignmentType::Argument,
-          );
-          return;
-        }
+      if args.len() >= 2
+        && let Some(key) = extract_string_value(&args[0])
+      {
+        check_expression_value(
+          ctx,
+          &key,
+          &args[1],
+          args[1].range(),
+          setter_type,
+        );
+        return;
       }
     }
   }
@@ -390,6 +430,26 @@ fn process_dict(ctx: &mut PythonContext, dict: &ExprDict) {
       &item.value,
       item.value.range(),
       AssignmentType::Element,
+    );
+  }
+}
+
+fn process_header_dict(ctx: &mut PythonContext, dict: &ExprDict) {
+  for item in &dict.items {
+    let Some(key_expr) = &item.key else {
+      continue;
+    };
+
+    let Some(name) = extract_string_value(key_expr) else {
+      continue;
+    };
+
+    check_expression_value(
+      ctx,
+      &name,
+      &item.value,
+      item.value.range(),
+      AssignmentType::Header,
     );
   }
 }
@@ -457,9 +517,10 @@ fn register_signature(func: &StmtFunctionDef) {
 /// Extracts positional string arguments from a call and either resolves
 /// them immediately or defers resolution for a later pass.
 fn process_positional_arguments(ctx: &mut PythonContext, call: &ExprCall) {
-  let Some(callee) = callee_name(&call.func) else {
+  let Expr::Name(ExprName { id, .. }) = call.func.as_ref() else {
     return;
   };
+  let callee = id.to_string();
 
   let extracted: Vec<(String, TextRange)> = call
     .arguments

@@ -5,8 +5,8 @@ use yaml_rust2::{
 
 use crate::{
   diagnostic::{
-    AssignmentType, SourceFileSpan, check_assignment, check_value,
-    compute_file_span,
+    AssignmentType, SourceFileSpan, check_assignment,
+    check_assignment_in_scope, check_value, compute_file_span,
   },
   processing::SourceContext,
   schemas::SchemaValue,
@@ -93,10 +93,10 @@ impl YamlHandler<'_> {
           if let Some(entry) = self.stack.last_mut() {
             entry.name_field = Some(value.clone());
           }
-        } else if key == "value" {
-          if let Some(entry) = self.stack.last_mut() {
-            entry.value_field = Some((value.clone(), mark, style));
-          }
+        } else if key == "value"
+          && let Some(entry) = self.stack.last_mut()
+        {
+          entry.value_field = Some((value.clone(), mark, style));
         }
 
         if value.is_empty() {
@@ -127,14 +127,20 @@ impl YamlHandler<'_> {
         };
 
         if !handled {
-          let start = mark.index();
-          let end = scalar_source_end(self.source, start, style, value.len());
-          if let Some(d) = check_assignment(
+          let scope_owned: Vec<String> = self
+            .stack
+            .iter()
+            .filter_map(|e| e.parent_key.clone())
+            .collect();
+          let scope: Vec<&str> =
+            scope_owned.iter().map(String::as_str).collect();
+          if let Some(d) = check_assignment_in_scope(
+            &scope,
             &normalize_name(&key),
             &normalize_value(&value),
             AssignmentType::Element,
             self.source_context,
-            || compute_span(self, start, end),
+            || scalar_span(self, mark, style, value.len()),
           ) {
             self.source_context.emit_diagnostic(d);
           }
@@ -147,12 +153,9 @@ impl YamlHandler<'_> {
     } else {
       // Sequence element.
       if !value.is_empty() {
-        let start = mark.index();
-        let end = scalar_source_end(self.source, start, style, value.len());
-
         if let Some(d) =
           check_value(&normalize_value(&value), self.source_context, || {
-            compute_span(self, start, end)
+            scalar_span(self, mark, style, value.len())
           })
         {
           self.source_context.emit_diagnostic(d);
@@ -179,14 +182,12 @@ impl YamlHandler<'_> {
     };
 
     if !value.is_empty() {
-      let start = value_mark.index();
-      let end = scalar_source_end(self.source, start, value_style, value.len());
       if let Some(d) = check_assignment(
         &normalize_name(&name),
         &normalize_value(&value),
         AssignmentType::Element,
         self.source_context,
-        || compute_span(self, start, end),
+        || scalar_span(self, value_mark, value_style, value.len()),
       ) {
         self.source_context.emit_diagnostic(d);
       }
@@ -273,6 +274,24 @@ fn compute_span(
   end: usize,
 ) -> SourceFileSpan {
   compute_file_span(handler.source_context, handler.source, start, end)
+}
+
+fn char_index_to_byte(source: &str, char_index: usize) -> usize {
+  source
+    .char_indices()
+    .nth(char_index)
+    .map_or(source.len(), |(byte, _)| byte)
+}
+
+fn scalar_span(
+  handler: &YamlHandler,
+  mark: Marker,
+  style: TScalarStyle,
+  value_len: usize,
+) -> SourceFileSpan {
+  let start = char_index_to_byte(handler.source, mark.index());
+  let end = scalar_source_end(handler.source, start, style, value_len);
+  compute_span(handler, start, end)
 }
 
 fn scalar_source_end(

@@ -1,27 +1,47 @@
 [package]
 name = "trestle"
-version = "1.3.0"
+version = "1.4.0"
 edition = "2024"
 license = "Apache-2.0"
 
+[workspace]
+members = ["trestle-net"]
+default-members = [".", "trestle-net"]
+
 [features]
 default = [
+  "lang-astro",
+  "lang-blade",
   "lang-config",
+  "lang-csharp",
   "lang-dart",
   "lang-dockerfile",
+  "lang-ejs",
+  "lang-erb",
   "lang-go",
+  "lang-groovy",
   "lang-hcl",
+  "lang-html",
   "lang-java",
   "lang-javascript",
   "lang-json",
+  "lang-kotlin",
+  "lang-liquid",
   "lang-php",
   "lang-plist",
+  "lang-powershell",
   "lang-python",
+  "lang-razor",
   "lang-redis",
   "lang-ruby",
   "lang-rust",
   "lang-shell",
+  "lang-sql",
+  "lang-svelte",
+  "lang-swift",
   "lang-toml",
+  "lang-twig",
+  "lang-vue",
   "lang-xml",
   "lang-yaml",
   "schema-aws-codebuild",
@@ -42,6 +62,7 @@ default = [
   "binary",
   "pem",
   "putty",
+  "rails-master-key",
   "services",
   "signatures",
   "url",
@@ -56,12 +77,20 @@ entropy-key = []
 entropy-token = []
 git-history = ["dep:chrono"]
 mcp = ["dep:rmcp", "dep:serde", "dep:tokio"]
+validation = []
+lang-astro = ["lang-javascript", "dep:tree-sitter", "dep:tree-sitter-astro-next"]
+lang-blade = ["lang-php"]
 lang-config = []
+lang-csharp = ["dep:tree-sitter", "dep:tree-sitter-c-sharp"]
 lsp = ["dep:crossbeam-channel", "dep:lsp-server", "dep:lsp-types", "dep:libc", "dep:windows-sys"]
 lang-dart = ["dep:tree-sitter", "dep:tree-sitter-dart"]
 lang-dockerfile = ["dep:dockerfile-parser"]
+lang-ejs = ["lang-html", "lang-javascript"]
+lang-erb = ["lang-html", "lang-ruby"]
 lang-go = ["dep:tree-sitter", "dep:tree-sitter-go"]
+lang-groovy = ["dep:tree-sitter", "dep:tree-sitter-groovy"]
 lang-hcl = ["dep:hcl-edit"]
+lang-html = ["lang-javascript", "dep:tree-sitter", "dep:tree-sitter-html"]
 lang-java = ["dep:tree-sitter", "dep:tree-sitter-java"]
 lang-javascript = [
   "dep:oxc_allocator",
@@ -71,7 +100,10 @@ lang-javascript = [
   "dep:oxc_syntax",
 ]
 lang-json = ["dep:jsonc-parser"]
+lang-kotlin = ["dep:tree-sitter", "dep:tree-sitter-kotlin-ng"]
+lang-liquid = ["lang-html"]
 lang-php = [
+  "lang-html",
   "dep:mago-ast",
   "dep:mago-interner",
   "dep:mago-parser",
@@ -79,16 +111,23 @@ lang-php = [
   "dep:mago-span",
 ]
 lang-plist = ["dep:plist", "dep:roxmltree"]
+lang-powershell = ["dep:tree-sitter", "dep:tree-sitter-powershell"]
 lang-python = [
   "dep:ruff_python_ast",
   "dep:ruff_python_parser",
   "dep:ruff_text_size",
 ]
+lang-razor = ["lang-csharp", "lang-html"]
 lang-redis = []
 lang-ruby = ["dep:ruby-prism"]
 lang-rust = ["dep:tree-sitter", "dep:tree-sitter-rust"]
 lang-shell = ["dep:brush-parser"]
+lang-sql = []
+lang-svelte = ["lang-javascript", "dep:tree-sitter", "dep:tree-sitter-svelte-ng"]
+lang-swift = ["dep:tree-sitter", "dep:tree-sitter-swift"]
 lang-toml = []
+lang-twig = ["lang-html"]
+lang-vue = ["lang-javascript", "dep:tree-sitter", "dep:tree-sitter-vue-next"]
 lang-xml = ["dep:roxmltree"]
 lang-yaml = ["dep:yaml-rust2"]
 
@@ -101,6 +140,7 @@ binary-keepass = []
 
 pem = ["dep:pgp"]
 putty = []
+rails-master-key = []
 
 services = [
   "service-adafruit",
@@ -118,6 +158,7 @@ services = [
   "service-azuredevops",
   "service-backstage",
   "service-beamer",
+  "service-braintree",
   "service-bitbucket",
   "service-bittrex",
   "service-bugsnag",
@@ -208,7 +249,9 @@ services = [
   "service-telegram",
   "service-todoist",
   "service-together",
+  "service-lob",
   "service-travis",
+  "service-trello",
   "service-twitch",
   "service-typeform",
   "service-uptimerobot",
@@ -237,6 +280,7 @@ service-azure = []
 service-azuredevops = []
 service-backstage = []
 service-beamer = []
+service-braintree = []
 service-bitbucket = []
 service-bittrex = []
 service-bugsnag = []
@@ -327,7 +371,9 @@ service-supabase = []
 service-telegram = []
 service-todoist = []
 service-together = []
+service-lob = []
 service-travis = []
+service-trello = []
 service-twitch = []
 service-typeform = []
 service-uptimerobot = []
@@ -346,6 +392,7 @@ signatures = [
   "signature-adafruit",
   "signature-age",
   "signature-alchemy",
+  "signature-amazon-mws",
   "signature-anthropic",
   "signature-apify",
   "signature-argon2",
@@ -359,6 +406,7 @@ signatures = [
   "signature-bcrypt",
   "signature-buildkite",
   "signature-azure-entra",
+  "signature-braintree",
   "signature-brevo",
   "signature-circleci",
   "signature-clojars",
@@ -370,9 +418,11 @@ signatures = [
   "signature-docker",
   "signature-doppler",
   "signature-dynatrace",
+  "signature-facebook",
   "signature-figma",
   "signature-flutterwave",
   "signature-flyio",
+  "signature-foursquare",
   "signature-github",
   "signature-gitlab",
   "signature-google",
@@ -384,6 +434,7 @@ signatures = [
   "signature-honeycomb",
   "signature-huggingface",
   "signature-infracost",
+  "signature-instagram",
   "signature-jwt",
   "signature-langsmith",
   "signature-launchdarkly",
@@ -423,13 +474,61 @@ signatures = [
   "signature-twilio",
   "signature-typeform",
   "signature-vercel",
+  "signature-wakatime",
   "signature-xata",
   "signature-yandex",
+  "signature-adyen",
+  "signature-alibaba",
+  "signature-aws-bedrock",
+  "signature-crates",
+  "signature-gcs-hmac",
+  "signature-neon",
+  "signature-openrouter",
+  "signature-paddle",
+  "signature-paypal",
+  "signature-pinecone",
+  "signature-resend",
+  "signature-stripe-webhook",
+  "signature-supabase-publishable",
+  "signature-tencent",
+  "signature-authress",
+  "signature-clickhouse",
+  "signature-dropbox",
+  "signature-duffel",
+  "signature-easypost",
+  "signature-frameio",
+  "signature-harness",
+  "signature-terraform-cloud",
+  "signature-maxmind",
+  "signature-teams-webhook",
+  "signature-prefect",
+  "signature-readme",
+  "signature-scalingo",
+  "signature-settlemint",
+  "signature-shippo",
+  "signature-checkout",
+  "signature-fleetbase",
+  "signature-ubidots",
+  "signature-xai",
+  "signature-nvidia",
+  "signature-ramp",
+  "signature-flexport",
+  "signature-sourcegraph-cody",
+  "signature-robinhood",
+  "signature-rootly",
+  "signature-saladcloud",
+  "signature-pagarme",
+  "signature-apr1",
+  "signature-md5crypt",
+  "signature-sha256crypt",
+  "signature-sha512crypt",
+  "signature-yescrypt",
 ]
 signature-1password = []
 signature-adafruit = []
 signature-age = []
 signature-alchemy = []
+signature-amazon-mws = []
 signature-anthropic = []
 signature-apify = []
 signature-argon2 = []
@@ -443,6 +542,7 @@ signature-bcrypt = []
 signature-buildkite = []
 signature-azure-connection = []
 signature-azure-entra = []
+signature-braintree = []
 signature-brevo = []
 signature-circleci = []
 signature-clojars = []
@@ -454,9 +554,11 @@ signature-discord-bot = []
 signature-docker = []
 signature-doppler = []
 signature-dynatrace = []
+signature-facebook = []
 signature-figma = []
 signature-flutterwave = []
 signature-flyio = []
+signature-foursquare = []
 signature-github = []
 signature-gitlab = []
 signature-google = []
@@ -468,6 +570,7 @@ signature-heroku = []
 signature-honeycomb = []
 signature-huggingface = []
 signature-infracost = []
+signature-instagram = []
 signature-jwt = []
 signature-langsmith = []
 signature-launchdarkly = []
@@ -507,8 +610,55 @@ signature-telegram = []
 signature-twilio = []
 signature-typeform = []
 signature-vercel = []
+signature-wakatime = []
 signature-xata = []
 signature-yandex = []
+signature-adyen = []
+signature-alibaba = []
+signature-aws-bedrock = []
+signature-crates = []
+signature-gcs-hmac = []
+signature-neon = []
+signature-openrouter = []
+signature-paddle = []
+signature-paypal = []
+signature-pinecone = []
+signature-resend = []
+signature-stripe-webhook = []
+signature-supabase-publishable = []
+signature-tencent = []
+signature-authress = []
+signature-clickhouse = []
+signature-dropbox = []
+signature-duffel = []
+signature-easypost = []
+signature-frameio = []
+signature-harness = []
+signature-terraform-cloud = []
+signature-maxmind = []
+signature-teams-webhook = []
+signature-prefect = []
+signature-readme = []
+signature-scalingo = []
+signature-settlemint = []
+signature-shippo = []
+signature-checkout = []
+signature-fleetbase = []
+signature-ubidots = []
+signature-xai = []
+signature-nvidia = []
+signature-ramp = []
+signature-flexport = []
+signature-sourcegraph-cody = []
+signature-robinhood = []
+signature-rootly = []
+signature-saladcloud = []
+signature-pagarme = []
+signature-apr1 = []
+signature-md5crypt = []
+signature-sha256crypt = []
+signature-sha512crypt = []
+signature-yescrypt = []
 
 url = ["dep:form_urlencoded", "dep:percent-encoding", "dep:url"]
 
@@ -592,10 +742,19 @@ terminal_size = "0.4"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }
 toml_edit = "0.22"
 tree-sitter = { version = "0.25", optional = true }
+tree-sitter-astro-next = { version = "0.1.1", optional = true }
+tree-sitter-c-sharp = { version = "0.23", optional = true }
 tree-sitter-dart = { version = "0.1.0", optional = true }
 tree-sitter-go = { version = "0.25", optional = true }
+tree-sitter-groovy = { version = "0.1", optional = true }
+tree-sitter-html = { version = "0.23", optional = true }
 tree-sitter-java = { version = "0.23", optional = true }
+tree-sitter-kotlin-ng = { version = "1", optional = true }
+tree-sitter-powershell = { version = "0.26", optional = true }
 tree-sitter-rust = { version = "0.24", optional = true }
+tree-sitter-svelte-ng = { version = "1", optional = true }
+tree-sitter-swift = { version = "0.7", optional = true }
+tree-sitter-vue-next = { version = "0.1", optional = true }
 url = { version = "2", optional = true }
 x509-cert = { version = "0.2", default-features = false, features = ["std"], optional = true }
 xxhash-rust = { version = "0.8", features = ["xxh3"], optional = true }

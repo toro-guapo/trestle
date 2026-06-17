@@ -21,8 +21,8 @@ pub fn normalize_name<'a>(name: &'a impl AsRef<str>) -> NormalizedName<'a> {
 
   for segment in name
     .trim()
-    .trim_matches(['_', '-', '.'])
-    .split(['_', '-', '.'])
+    .trim_matches(['_', '-', '.', '/'])
+    .split(['_', '-', '.', '/'])
   {
     if !segment.is_empty() {
       for normalized_segment in normalize_camel_case_and_lower(segment) {

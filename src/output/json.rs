@@ -33,15 +33,15 @@ pub fn write(ctx: WriteContext<'_>) -> ScanSummary {
   writeln!(ctx.output_writer).ok();
   writeln!(ctx.output_writer, "  ]").ok();
 
-  if ctx.options.show_summary {
-    if let Ok(stats) = ctx.scan_stats_receiver.recv() {
-      let formatted = build_summary(stats, summary);
-      writeln!(ctx.output_writer, ",").ok();
-      write!(ctx.output_writer, "  \"summary\": ").ok();
-      let value = build_summary_value(&formatted);
-      write_indented_json(ctx.output_writer, &value, 2);
-      writeln!(ctx.output_writer).ok();
-    }
+  if ctx.options.show_summary
+    && let Ok(stats) = ctx.scan_stats_receiver.recv()
+  {
+    let formatted = build_summary(stats, summary);
+    writeln!(ctx.output_writer, ",").ok();
+    write!(ctx.output_writer, "  \"summary\": ").ok();
+    let value = build_summary_value(&formatted);
+    write_indented_json(ctx.output_writer, &value, 2);
+    writeln!(ctx.output_writer).ok();
   }
 
   writeln!(ctx.output_writer, "}}").ok();
@@ -135,6 +135,11 @@ fn diagnostic_to_json(annotated: &AnnotatedDiagnostic) -> serde_json::Value {
   #[cfg(feature = "git-history")]
   if let Some(history) = &annotated.history {
     obj["history"] = history_to_json(history);
+  }
+
+  #[cfg(feature = "validation")]
+  if let Some(status) = annotated.validation() {
+    obj["validation"] = json!(status.as_str());
   }
 
   obj

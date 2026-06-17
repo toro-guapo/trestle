@@ -15,6 +15,12 @@ pub struct Analyzer<Argument, Span> {
   pub call_frames: Vec<CallFrame<Argument, Span>>,
 }
 
+impl<Argument, Span> Default for Analyzer<Argument, Span> {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
 impl<Argument, Span> Analyzer<Argument, Span> {
   pub fn new() -> Self {
     Self {
@@ -25,6 +31,10 @@ impl<Argument, Span> Analyzer<Argument, Span> {
 
   pub fn clear(&mut self) {
     self.signatures.clear();
+    self.call_frames.clear();
+  }
+
+  pub fn clear_frames(&mut self) {
     self.call_frames.clear();
   }
 

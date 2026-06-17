@@ -30,11 +30,11 @@ pub fn write(ctx: WriteContext<'_>) -> ScanSummary {
 
   writer.flush().ok();
 
-  if ctx.options.show_summary {
-    if let Ok(stats) = ctx.scan_stats_receiver.recv() {
-      let formatted = build_summary(stats, summary);
-      eprintln!("{}", formatted.message);
-    }
+  if ctx.options.show_summary
+    && let Ok(stats) = ctx.scan_stats_receiver.recv()
+  {
+    let formatted = build_summary(stats, summary);
+    eprintln!("{}", formatted.message);
   }
 
   summary

@@ -4,7 +4,7 @@ use crate::{
   analysis::{Analyzer, CallFrame, FunctionSignature},
   diagnostic::{
     AssignmentType, Diagnostic, SourceFileSpan, SourceSpan, check_assignment,
-    check_value, offset_to_position,
+    check_header_assignment, check_value, offset_to_position,
   },
   processing::SourceContext,
   secrets::{
@@ -38,11 +38,30 @@ pub fn parse(context: &SourceContext) -> bool {
   };
 
   let result = ruby_prism::parse(source.as_bytes());
-
   if result.errors().count() > 0 {
     return false;
   }
 
+  run(context, source, &result, &[]);
+  true
+}
+
+pub fn scan(
+  context: &SourceContext,
+  source: &str,
+  output_spans: &[(usize, usize)],
+) -> bool {
+  let result = ruby_prism::parse(source.as_bytes());
+  run(context, source, &result, output_spans);
+  true
+}
+
+fn run(
+  context: &SourceContext,
+  source: &str,
+  result: &ruby_prism::ParseResult<'_>,
+  output_spans: &[(usize, usize)],
+) {
   let mut ctx = RubyContext {
     source,
     source_context: context,
@@ -52,16 +71,29 @@ pub fn parse(context: &SourceContext) -> bool {
 
   ctx.visit(&result.node());
 
-  let analyzer = std::mem::replace(&mut ctx.analyzer, Analyzer::new());
+  let analyzer = std::mem::take(&mut ctx.analyzer);
   analyzer.resolve_calls(|sig, args| {
     resolve_arguments(&mut ctx, sig, args);
   });
   ctx.analyzer = analyzer;
 
-  true
+  let _ = output_spans;
 }
 
 impl ruby_prism::Visit<'_> for RubyContext<'_> {
+  fn visit_string_node(&mut self, node: &ruby_prism::StringNode<'_>) {
+    let value = node.as_node();
+    let location = value.location();
+    check_expression_value(
+      self,
+      None,
+      &value,
+      location.start_offset(),
+      location.end_offset(),
+      AssignmentType::Variable,
+    );
+  }
+
   fn visit_local_variable_write_node(
     &mut self,
     node: &ruby_prism::LocalVariableWriteNode<'_>,
@@ -246,22 +278,89 @@ impl ruby_prism::Visit<'_> for RubyContext<'_> {
     let method = cid(node.name());
 
     // ENV["KEY"] = value.
-    if method == "[]=" && is_env_receiver(node) {
-      if let Some(args_node) = node.arguments() {
-        let args: Vec<_> = args_node.arguments().iter().collect();
-        if args.len() >= 2
-          && let Some(key) = extract_string(&args[0])
-        {
-          let v_loc = args[1].location();
-          check_expression_value(
-            self,
-            Some(&key),
-            &args[1],
-            v_loc.start_offset(),
-            v_loc.end_offset(),
-            AssignmentType::Variable,
-          );
-        }
+    if method == "[]="
+      && is_env_receiver(node)
+      && let Some(args_node) = node.arguments()
+    {
+      let args: Vec<_> = args_node.arguments().iter().collect();
+      if args.len() >= 2
+        && let Some(key) = extract_string(&args[0])
+      {
+        let v_loc = args[1].location();
+        check_expression_value(
+          self,
+          Some(&key),
+          &args[1],
+          v_loc.start_offset(),
+          v_loc.end_offset(),
+          AssignmentType::Variable,
+        );
+      }
+    }
+
+    // container["key"] = value / container[:key] = value (non-ENV indexers):
+    // the key names the secret.
+    if method == "[]="
+      && !is_env_receiver(node)
+      && let Some(args_node) = node.arguments()
+    {
+      let args: Vec<_> = args_node.arguments().iter().collect();
+      if args.len() >= 2
+        && let Some(key) =
+          extract_string(&args[0]).or_else(|| extract_symbol(&args[0]))
+      {
+        let v_loc = args[1].location();
+        check_expression_value(
+          self,
+          Some(&key),
+          &args[1],
+          v_loc.start_offset(),
+          v_loc.end_offset(),
+          AssignmentType::Element,
+        );
+      }
+    }
+
+    // receiver.member = value: an attribute setter, named by the member.
+    if node.receiver().is_some()
+      && let Some(member) = method.strip_suffix('=')
+      && !member.is_empty()
+      && member.chars().all(|c| c.is_alphanumeric() || c == '_')
+      && let Some(args_node) = node.arguments()
+    {
+      let args: Vec<_> = args_node.arguments().iter().collect();
+      if let [value] = args.as_slice() {
+        let v_loc = value.location();
+        check_expression_value(
+          self,
+          Some(member),
+          value,
+          v_loc.start_offset(),
+          v_loc.end_offset(),
+          AssignmentType::Property,
+        );
+      }
+    }
+
+    // req.add_field("Header-Name", value) sets an HTTP header (Net::HTTP).
+    // add_field is a method, so require a receiver.
+    if method == "add_field"
+      && node.receiver().is_some()
+      && let Some(args_node) = node.arguments()
+    {
+      let args: Vec<_> = args_node.arguments().iter().collect();
+      if args.len() >= 2
+        && let Some(key) = extract_string(&args[0])
+      {
+        let v_loc = args[1].location();
+        check_expression_value(
+          self,
+          Some(&key),
+          &args[1],
+          v_loc.start_offset(),
+          v_loc.end_offset(),
+          AssignmentType::Header,
+        );
       }
     }
 
@@ -286,7 +385,7 @@ impl ruby_prism::Visit<'_> for RubyContext<'_> {
         })
         .collect();
 
-      if !extracted.is_empty() {
+      if !extracted.is_empty() && node.receiver().is_none() {
         let signature_clone = self.analyzer.get_signature(&method).cloned();
         if let Some(sig) = signature_clone {
           resolve_arguments(self, &sig, &extracted);
@@ -439,6 +538,12 @@ fn check_expression_value(
 
     let normalized = normalize_value(&value_str);
     let diag: Option<Diagnostic> = match name {
+      Some(n) if assignment_type == AssignmentType::Header => {
+        ctx.record_emitted(v_start, v_end);
+        check_header_assignment(n, &value_str, ctx.source_context, || {
+          compute_span_offsets(ctx, start, end)
+        })
+      }
       Some(n) => {
         ctx.record_emitted(v_start, v_end);
         check_assignment(
@@ -460,6 +565,7 @@ fn check_expression_value(
       }
       ctx.source_context.emit_diagnostic(d);
     }
+
     return;
   }
 
@@ -516,19 +622,18 @@ fn check_expression_value(
             }
           }
           // ENV.fetch('KEY') { default }
-          if let Some(block) = call.block() {
-            if let Some(block_node) = block.as_block_node() {
-              if let Some(body) = block_node.body() {
-                check_expression_value(
-                  ctx,
-                  name,
-                  &body,
-                  start,
-                  end,
-                  assignment_type,
-                );
-              }
-            }
+          if let Some(block) = call.block()
+            && let Some(block_node) = block.as_block_node()
+            && let Some(body) = block_node.body()
+          {
+            check_expression_value(
+              ctx,
+              name,
+              &body,
+              start,
+              end,
+              assignment_type,
+            );
           }
           return;
         }
@@ -561,6 +666,13 @@ fn check_expression_value(
         }
       }
     }
+    Node::ArrayNode { .. } => {
+      if let Some(array) = value.as_array_node() {
+        for element in array.elements().iter() {
+          check_branch(ctx, name, &element, assignment_type);
+        }
+      }
+    }
     _ => {}
   }
 }
@@ -574,6 +686,15 @@ fn process_hash_element(ctx: &mut RubyContext, element: &Node) {
   else {
     return;
   };
+
+  // headers: { "Header-Name" => value } - each entry is an HTTP header.
+  if key == "headers"
+    && let Some(hash) = a.value().as_hash_node()
+  {
+    process_header_hash(ctx, &hash);
+    return;
+  }
+
   let v_loc = a.value().location();
   let start = v_loc.start_offset();
   let end = v_loc.end_offset();
@@ -585,6 +706,31 @@ fn process_hash_element(ctx: &mut RubyContext, element: &Node) {
     end,
     AssignmentType::Element,
   );
+}
+
+fn process_header_hash(ctx: &mut RubyContext, hash: &ruby_prism::HashNode<'_>) {
+  for element in hash.elements().iter() {
+    let Some(a) = element.as_assoc_node() else {
+      continue;
+    };
+
+    let Some(key) =
+      extract_string(&a.key()).or_else(|| extract_symbol(&a.key()))
+    else {
+      continue;
+    };
+
+    let v_loc = a.value().location();
+
+    check_expression_value(
+      ctx,
+      Some(&key),
+      &a.value(),
+      v_loc.start_offset(),
+      v_loc.end_offset(),
+      AssignmentType::Header,
+    );
+  }
 }
 
 fn process_keyword_hash(ctx: &mut RubyContext, node: &Node) {
@@ -599,6 +745,15 @@ fn process_keyword_hash(ctx: &mut RubyContext, node: &Node) {
     let Some(key) = extract_symbol(&assoc.key()) else {
       continue;
     };
+
+    // method(headers: { "Header-Name" => value }): each entry is a header.
+    if key == "headers"
+      && let Some(hash) = assoc.value().as_hash_node()
+    {
+      process_header_hash(ctx, &hash);
+      continue;
+    }
+
     let v_loc = assoc.value().location();
     let start = v_loc.start_offset();
     let end = v_loc.end_offset();

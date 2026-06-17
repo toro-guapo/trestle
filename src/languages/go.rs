@@ -6,7 +6,7 @@ use crate::{
   analysis::{Analyzer, CallFrame, FunctionSignature},
   diagnostic::{
     AssignmentType, Diagnostic, SourceFileSpan, SourceSpan, check_assignment,
-    check_value, offset_to_position,
+    check_header_assignment, check_value, offset_to_position,
   },
   processing::SourceContext,
   secrets::{
@@ -93,7 +93,7 @@ fn process_node(ctx: &mut GoContext, node: Node, source: &[u8]) {
     "keyed_element" => {
       process_keyed_element(ctx, node, source);
     }
-    "function_declaration" | "method_declaration" => {
+    "function_declaration" => {
       register_signature(node, source);
     }
     _ => {}
@@ -121,12 +121,10 @@ fn process_assignment(ctx: &mut GoContext, node: Node, source: &[u8]) {
   let values = named_children(right);
 
   for (name_node, value_node) in names.iter().zip(values.iter()) {
-    let Some(name) = extract_name(*name_node, source) else {
-      continue;
-    };
+    let name = extract_name(*name_node, source);
     check_expression_value(
       ctx,
-      Some(&name),
+      name.as_deref(),
       *value_node,
       *value_node,
       source,
@@ -194,19 +192,30 @@ fn process_call(ctx: &mut GoContext, node: Node, source: &[u8]) {
   let args = named_children(args_node);
 
   // Name-value correlation: arg 0 is the name, arg 1 is the value.
-  // os.Setenv("KEY", value), header.Set("X-Api-Key", value).
-  if (callee == "Setenv" || callee == "Set") && args.len() >= 2 {
-    if let Some(key) = extract_string(args[0], source) {
-      check_expression_value(
-        ctx,
-        Some(&key),
-        args[1],
-        args[1],
-        source,
-        AssignmentType::Argument,
-      );
-      return;
-    }
+  // os.Setenv("KEY", value) sets an environment variable; (http.Header).Set /
+  // .Add ("Header-Name", value) sets an HTTP header.
+  let setter_type = if matches!(callee.as_str(), "Set" | "Add")
+    && receiver_is_header(func_node, source)
+  {
+    Some(AssignmentType::Header)
+  } else if callee == "Setenv" || callee == "Set" {
+    Some(AssignmentType::Argument)
+  } else {
+    None
+  };
+  if let Some(setter_type) = setter_type
+    && args.len() >= 2
+    && let Some(key) = extract_string(args[0], source)
+  {
+    check_expression_value(
+      ctx,
+      Some(&key),
+      args[1],
+      args[1],
+      source,
+      setter_type,
+    );
+    return;
   }
 
   for arg in &args {
@@ -218,6 +227,10 @@ fn process_call(ctx: &mut GoContext, node: Node, source: &[u8]) {
       source,
       AssignmentType::Argument,
     );
+  }
+
+  if func_node.kind() != "identifier" {
+    return;
   }
 
   let extracted: Vec<(String, (usize, usize))> = args
@@ -340,10 +353,10 @@ fn register_signature(node: Node, source: &[u8]) {
     if child.kind() == "parameter_declaration" {
       let mut inner = child.walk();
       for param_child in child.children(&mut inner) {
-        if param_child.kind() == "identifier" {
-          if let Ok(name) = param_child.utf8_text(source) {
-            parameter_names.push(name.to_owned());
-          }
+        if param_child.kind() == "identifier"
+          && let Ok(name) = param_child.utf8_text(source)
+        {
+          parameter_names.push(name.to_owned());
         }
       }
     }
@@ -386,6 +399,11 @@ fn check_expression_value(
 
     let normalized = normalize_value(&value);
     let diag: Option<Diagnostic> = match name {
+      Some(n) if assignment_type == AssignmentType::Header => {
+        check_header_assignment(n, &value, ctx.source_context, || {
+          compute_span(ctx, span_node)
+        })
+      }
       Some(n) => check_assignment(
         &normalize_name(&n.to_owned()),
         &normalized,
@@ -456,6 +474,25 @@ fn check_expression_value(
         }
       }
     }
+    // []string{"a", "b"}: positional elements inherit the name.
+    "composite_literal" => {
+      if let Some(body) = value_node.child_by_field_name("body") {
+        for element in named_children(body) {
+          if element.kind() == "literal_element" {
+            for child in named_children(element) {
+              check_expression_value(
+                ctx,
+                name,
+                child,
+                span_node,
+                source,
+                assignment_type,
+              );
+            }
+          }
+        }
+      }
+    }
     _ => {}
   }
 }
@@ -495,7 +532,31 @@ fn extract_name(node: Node, source: &[u8]) -> Option<String> {
       let field = node.child_by_field_name("field")?;
       field.utf8_text(source).ok().map(|s| s.to_owned())
     }
+    "index_expression" => {
+      extract_string(node.child_by_field_name("index")?, source)
+    }
     _ => None,
+  }
+}
+
+fn receiver_is_header(func_node: Node, source: &[u8]) -> bool {
+  func_node
+    .child_by_field_name("operand")
+    .is_some_and(|operand| selector_field_is_header(operand, source))
+}
+
+fn selector_field_is_header(node: Node, source: &[u8]) -> bool {
+  match node.kind() {
+    "selector_expression" => {
+      node
+        .child_by_field_name("field")
+        .and_then(|f| f.utf8_text(source).ok())
+        == Some("Header")
+    }
+    "call_expression" => node
+      .child_by_field_name("function")
+      .is_some_and(|f| selector_field_is_header(f, source)),
+    _ => false,
   }
 }
 

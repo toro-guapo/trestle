@@ -28,11 +28,7 @@ pub fn run(base: &ScanContext, on_change: impl Fn(&ScanContext, Vec<PathBuf>)) {
 
   eprintln!("Watching for changes...");
 
-  loop {
-    let Ok(first) = event_rx.recv() else {
-      break;
-    };
-
+  while let Ok(first) = event_rx.recv() {
     let mut paths = BTreeSet::new();
     collect_paths(&first, &mut paths);
 

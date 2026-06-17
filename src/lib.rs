@@ -1,6 +1,7 @@
 pub mod analysis;
 #[cfg(feature = "cache")]
 pub mod caching;
+pub mod cli;
 pub mod config;
 pub mod data;
 pub mod diagnostic;
@@ -27,4 +28,6 @@ pub mod shared;
 pub mod source;
 pub mod text;
 pub mod trestlerc;
+#[cfg(feature = "validation")]
+pub mod validation;
 pub mod watch;

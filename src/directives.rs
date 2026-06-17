@@ -78,15 +78,12 @@ fn parse_directive_line(line: &str) -> Option<(DirectiveKind, bool)> {
 
   let delim_len = if trimmed_before.ends_with("<!--") {
     4
-  } else if trimmed_before.ends_with("//") {
+  } else if trimmed_before.ends_with("//")
+    || trimmed_before.ends_with("/*")
+    || trimmed_before.ends_with("--")
+  {
     2
-  } else if trimmed_before.ends_with("/*") {
-    2
-  } else if trimmed_before.ends_with("--") {
-    2
-  } else if trimmed_before.ends_with('#') {
-    1
-  } else if trimmed_before.ends_with(';') {
+  } else if trimmed_before.ends_with('#') || trimmed_before.ends_with(';') {
     1
   } else {
     return None;

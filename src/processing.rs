@@ -1160,6 +1160,10 @@ fn send_signature_diagnostics(
       continue;
     };
 
+    if is_embedded_in_base64_blob(content, range.start, range.end) {
+      continue;
+    }
+
     let value = normalize_value(&matched);
 
     let Some(value_class) = classify_matched_signature(sig, &value) else {
@@ -1196,6 +1200,95 @@ fn send_signature_diagnostics(
 
     run_context.send_diagnostic(diagnostic);
   }
+}
+
+#[cfg(feature = "signatures")]
+fn is_embedded_in_base64_blob(content: &str, start: usize, end: usize) -> bool {
+  fn is_base64_symbol(byte: u8) -> bool {
+    byte == b'+' || byte == b'/'
+  }
+
+  let bytes = content.as_bytes();
+
+  let extends_left = start
+    .checked_sub(1)
+    .and_then(|i| bytes.get(i))
+    .is_some_and(|&byte| is_base64_symbol(byte));
+
+  let extends_right =
+    bytes.get(end).is_some_and(|&byte| is_base64_symbol(byte));
+
+  if !extends_left && !extends_right {
+    return false;
+  }
+
+  !is_secret_in_web_url(content, start, end)
+}
+
+#[cfg(all(feature = "signatures", feature = "url"))]
+fn is_secret_in_web_url(content: &str, start: usize, end: usize) -> bool {
+  use url::Url;
+
+  fn is_url_terminator(byte: u8) -> bool {
+    !byte.is_ascii()
+      || byte.is_ascii_whitespace()
+      || matches!(
+        byte,
+        b'"' | b'\'' | b'`' | b'<' | b'>' | b'\\' | b'^' | b'{' | b'}' | b'|'
+      )
+  }
+
+  let bytes = content.as_bytes();
+
+  let mut token_start = start;
+  while let Some(&prev) = token_start.checked_sub(1).and_then(|i| bytes.get(i))
+  {
+    if is_url_terminator(prev) {
+      break;
+    }
+
+    token_start -= 1;
+  }
+
+  let mut token_end = end;
+  while let Some(&next) = bytes.get(token_end) {
+    if is_url_terminator(next) {
+      break;
+    }
+
+    token_end += 1;
+  }
+
+  let Some(token) = content.get(token_start..token_end) else {
+    return false;
+  };
+
+  if !token.contains("://") {
+    return false;
+  }
+
+  let Ok(parsed) = Url::parse(token) else {
+    return false;
+  };
+
+  if !parsed.has_authority() {
+    return false;
+  }
+
+  let Some(secret) = content.get(start..end) else {
+    return false;
+  };
+
+  parsed.path().contains(secret)
+    || parsed.query().is_some_and(|query| query.contains(secret))
+    || parsed
+      .fragment()
+      .is_some_and(|fragment| fragment.contains(secret))
+}
+
+#[cfg(all(feature = "signatures", not(feature = "url")))]
+fn is_secret_in_web_url(_content: &str, _start: usize, _end: usize) -> bool {
+  false
 }
 
 #[cfg(feature = "rails-master-key")]

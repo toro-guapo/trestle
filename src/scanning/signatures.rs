@@ -607,7 +607,7 @@ const SIGNATURES: &[Signature] = &[
   Signature {
     name: "NuGet API key",
     env_var: "NUGET_API_KEY",
-    pattern: r"(?-u:\b)oy2[A-Za-z0-9]{40,}(?-u:\b)",
+    pattern: r"(?-u:\b)oy2[a-z0-9]{43}(?-u:\b)",
   },
   #[cfg(feature = "signature-nvidia")]
   Signature {
